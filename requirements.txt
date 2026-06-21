@@ -1,0 +1,10 @@
+streamlit>=1.28.0
+pandas
+folium
+streamlit-folium
+simplekml
+python-docx
+utm
+numpy
+Pillow
+plotly
