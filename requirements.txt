@@ -1,10 +1,23 @@
+# requirements.txt — AfloraGeo
+# Caderneta de campo geológica com Streamlit
+
+# Framework web principal para criar a interface do app
 streamlit>=1.28.0
+
+# Manipulação e análise de DataFrames (planilhas de dados geológicos)
 pandas
+
+# Geração de mapas interativos baseados em Leaflet
 folium
+
+# Integração entre mapas Folium e aplicações Streamlit
 streamlit-folium
-simplekml
-python-docx
+
+# Conversão entre coordenadas UTM e Lat/Lon
 utm
-numpy
-Pillow
-plotly
+
+# Geração de relatórios em formato Microsoft Word (.docx)
+python-docx
+
+# Conversão de coordenadas entre diferentes sistemas de referência (SRC)
+pyproj

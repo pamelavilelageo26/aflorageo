@@ -3,43 +3,275 @@ import sqlite3
 import os
 import json
 import datetime
-import base64
+import re
+import math
 import io
+import base64
+import zipfile
 from pathlib import Path
 
-# --- CONFIGURAÇÃO INICIAL ---
-st.set_page_config(
-    page_title="AfloraGeo - Caderneta de Campo Geológica",
-    page_icon="🌋",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+import folium
+from folium.plugins import MarkerCluster
+from streamlit_folium import st_folium
+import pandas as pd
+import utm
+from docx import Document
+from docx.shared import Inches, Pt, RGBColor
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 
-DB_FILE = "aflorageo.db"
+# ---------------------------------------------------------------------------
+# CONFIGURAÇÕES GLOBAIS
+# ---------------------------------------------------------------------------
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "aflorageo.db")
+DEFAULT_FREE_LIMIT = 30
+ACTIVATION_KEY = "AFLORAGEO-PREMIUM-2024"
 
-# --- CSS PERSONALIZADO ---
-st.markdown(
-    """
-    <style>
-    .stButton>button { width: 100%; }
-    div[data-testid="stMetric"] { background-color: #f0f2f6; padding: 10px; border-radius: 10px; }
-    .premium-card { border: 2px solid #e0e0e0; border-radius: 12px; padding: 16px; text-align: center; }
-    .premium-card-popular { border: 2px solid #ffd700; background-color: #fffdf5; border-radius: 12px; padding: 16px; text-align: center; }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+CORES_MUNSELL = [
+    ("", "Selecione a cor"),
+    ("N1", "Preto"),
+    ("N2", "Cinza muito escuro"),
+    ("N3", "Cinza escuro"),
+    ("N4", "Cinza médio escuro"),
+    ("N5", "Cinza médio"),
+    ("N6", "Cinza médio claro"),
+    ("N7", "Cinza claro"),
+    ("N8", "Cinza muito claro"),
+    ("N9", "Branco"),
+    ("5R 3/2", "Vermelho escuro acinzentado"),
+    ("5R 3/4", "Vermelho escuro"),
+    ("5R 4/6", "Vermelho"),
+    ("5R 5/6", "Vermelho claro"),
+    ("10R 3/4", "Vermelho escuro"),
+    ("10R 4/2", "Vermelho escuro acinzentado"),
+    ("10R 4/6", "Vermelho médio"),
+    ("10R 5/4", "Vermelho claro acinzentado"),
+    ("5YR 3/4", "Marrom avermelhado escuro"),
+    ("5YR 4/4", "Marrom avermelhado"),
+    ("5YR 5/6", "Marrom claro avermelhado"),
+    ("5YR 6/3", "Marrom claro"),
+    ("5YR 7/4", "Marrom amarelado claro"),
+    ("7.5YR 4/4", "Marrom"),
+    ("7.5YR 5/6", "Marrom claro"),
+    ("7.5YR 6/4", "Marrom claro acinzentado"),
+    ("10YR 3/4", "Marrom amarelado escuro"),
+    ("10YR 4/4", "Marrom amarelado"),
+    ("10YR 5/4", "Marrom amarelado"),
+    ("10YR 5/6", "Marrom amarelado"),
+    ("10YR 6/3", "Marrom claro acinzentado"),
+    ("10YR 7/4", "Amarelo claro acinzentado"),
+    ("10YR 8/1", "Branco"),
+    ("2.5Y 5/4", "Marrom oliva claro"),
+    ("2.5Y 6/3", "Cinza claro amarelado"),
+    ("2.5Y 7/2", "Cinza claro amarelado"),
+    ("2.5Y 8/1", "Branco acinzentado"),
+    ("5Y 4/1", "Cinza escuro"),
+    ("5Y 5/2", "Cinza oliva claro"),
+    ("5Y 6/2", "Cinza oliva claro"),
+    ("5Y 7/3", "Amarelo claro"),
+    ("5GY 5/2", "Verde acinzentado"),
+    ("5G 5/3", "Verde acinzentado"),
+    ("5BG 5/3", "Azul esverdeado acinzentado"),
+    ("5B 5/4", "Azul acinzentado"),
+    ("5PB 5/3", "Azul arroxeado acinzentado"),
+    ("5P 5/4", "Roxo acinzentado"),
+    ("5RP 5/3", "Roxo avermelhado acinzentado"),
+    ("5R 6/2", "Rosa acinzentado"),
+]
 
-# --- FUNÇÕES DE BANCO DE DADOS ---
+TIPOS_AFLO = [
+    "Corte de estrada", "Lajeado", "Pedreira", "Rio", "Trincheira", "Galeria",
+    "Afloramento natural", "Barranco", "Talude", "Túnel", "Poço", "Mina", "Açude",
+    "Praia", "Dunas", "Terraço", "Voçoroca", "Bloco isolado (matacão)",
+    "Cavidade artificial (empresta)", "Outro"
+]
 
+ACESSOS = [
+    "Caminhamento", "Carro 4x4", "Carro passeio", "Barco motorizado", "Barco a remo",
+    "Helicóptero", "Avião", "Bicicleta", "Moto", "Ônibus", "Animal (cavalo/burro/mula)",
+    "Trator", "Quadriciclo"
+]
+
+TIPOS_ESTRUTURA_SELECT = [
+    "Acamamento (Bedding)", "Foliação (Foliation)", "Fratura (Joint)", "Falha (Fault)",
+    "Dobra (Fold)", "Lineação (Lineation)", "Paleocorrente (Paleocurrent)", "Veio (Vein)",
+    "Dique (Dike)", "Xistosidade (Schistosity)", "Clivagem (Cleavage)", "Eixo de dobra (Fold axis)",
+    "Superfície axial (Axial surface)", "Zona de cisalhamento (Shear zone)", "Contato (Contact)",
+    "Outro (Other)"
+]
+
+FINALIDADES_AMOSTRA_LISTA = [
+    "Petrografia", "Geoquímica (rocha total)", "Geoquímica (orgânica)", "Geocronologia",
+    "Granulometria", "Difração de Raios-X (DRX)", "Fluorescência de Raios-X (FRX)",
+    "Microscopia Eletrônica (MEV/EDS)", "Isótopos Estáveis", "Datação Radiométrica",
+    "Paleontologia", "Análise Mineralógica", "Análise Petrofísica", "Microssonda Eletrônica",
+    "Laminação Delgada", "Catodoluminescência", "Bioestratigrafia", "Sedimentologia",
+    "Geofísica de Poço", "Análise Térmica (DSC/TGA)", "Outro"
+]
+
+DENSIDADE_ROCHAS = [
+    ("Aluvião", "1,96-2,00", "1,98"),
+    ("Argila", "1,76-2,30", "2,03"),
+    ("Basalto", "2,70-3,10", "2,90"),
+    ("Calcário", "2,20-2,75", "2,48"),
+    ("Carvão mineral", "1,20-1,50", "1,35"),
+    ("Conglomerado", "2,10-2,60", "2,35"),
+    ("Diabásio", "2,80-3,00", "2,90"),
+    ("Dolomita", "2,50-2,90", "2,70"),
+    ("Gabbro", "2,90-3,10", "3,00"),
+    ("Gnaisse", "2,59-3,00", "2,80"),
+    ("Granito", "2,50-2,81", "2,65"),
+    ("Grauvaca", "2,35-2,85", "2,60"),
+    ("Areia", "1,65-2,00", "1,83"),
+    ("Areia saturada", "1,90-2,30", "2,10"),
+    ("Folhelho", "2,06-2,66", "2,36"),
+    ("Mármore", "2,40-2,90", "2,65"),
+    ("Quartzito", "2,50-2,70", "2,60"),
+    ("Riolito", "2,35-2,70", "2,52"),
+    ("Sal", "2,00-2,40", "2,20"),
+    ("Serpentinito", "2,50-2,80", "2,65"),
+    ("Sienito", "2,60-2,90", "2,75"),
+    ("Siltito", "2,30-2,70", "2,50"),
+    ("Diabásio alterado", "2,40-2,80", "2,60"),
+    ("Talco", "2,50-2,80", "2,65"),
+]
+
+VELOCIDADE_ONDAS_P = [
+    ("Aluvião", "400-1.900", "1.000"),
+    ("Argila", "1.000-2.500", "1.800"),
+    ("Areia seca", "400-1.500", "900"),
+    ("Areia saturada", "1.500-2.000", "1.750"),
+    ("Areia argilosa", "1.500-2.000", "1.750"),
+    ("Basalto", "5.000-6.000", "5.500"),
+    ("Calcário", "3.500-6.000", "4.500"),
+    ("Calcário dolomítico", "4.500-6.500", "5.500"),
+    ("Carvão mineral", "1.200-2.200", "1.700"),
+    ("Conglomerado", "2.000-4.000", "3.000"),
+    ("Diabásio", "5.500-6.500", "6.000"),
+    ("Dolomita", "3.500-6.500", "5.000"),
+    ("Gabbro", "6.500-7.000", "6.750"),
+    ("Gnaisse", "4.500-6.000", "5.250"),
+    ("Granito", "4.500-6.000", "5.250"),
+    ("Grauvaca", "3.500-4.500", "4.000"),
+    ("Folhelho", "2.500-4.000", "3.250"),
+    ("Mármore", "3.500-6.000", "4.750"),
+    ("Quartzito", "5.000-6.500", "5.750"),
+    ("Riolito", "4.000-5.500", "4.750"),
+    ("Sal", "4.000-5.500", "4.750"),
+    ("Serpentinito", "4.000-6.500", "5.250"),
+    ("Sienito", "4.500-5.500", "5.000"),
+    ("Siltito", "2.500-4.000", "3.250"),
+    ("Água (doce)", "1.400-1.500", "1.450"),
+    ("Água do mar", "1.450-1.500", "1.475"),
+    ("Gelo", "3.400-3.800", "3.600"),
+    ("Ar", "330-340", "335"),
+    ("Petróleo", "1.200-1.400", "1.300"),
+]
+
+SUSCETIBILIDADE_MAGNETICA = [
+    ("Quartzo", "-0,018 × 10⁻⁶", "Diamagnético"),
+    ("Halita", "-0,010 × 10⁻⁶", "Diamagnético"),
+    ("Calcita", "-0,009 × 10⁻⁶", "Diamagnético"),
+    ("Feldspato", "0,330 × 10⁻⁶", "Paramagnético"),
+    ("Muscovita", "0,790 × 10⁻⁶", "Paramagnético"),
+    ("Biotita", "1,500 × 10⁻⁶", "Paramagnético"),
+    ("Anfibólio", "1,600 × 10⁻⁶", "Paramagnético"),
+    ("Piroxênio", "2,400 × 10⁻⁶", "Paramagnético"),
+    ("Olivina", "3,200 × 10⁻⁶", "Paramagnético"),
+    ("Magnetita", "6.000 × 10⁻⁶", "Ferromagnético"),
+    ("Titano-magnetita", "4.000 × 10⁻⁶", "Ferromagnético"),
+    ("Hematita", "500 × 10⁻⁶", "Ferromagnético"),
+    ("Ilmenita", "1.800 × 10⁻⁶", "Ferromagnético"),
+    ("Pirita", "30 × 10⁻⁶", "Paramagnético/ferrimagnético"),
+    ("Granito", "0,1-50 × 10⁻⁶", "Variável"),
+    ("Basalto", "10-1.000 × 10⁻⁶", "Variável"),
+    ("Diabásio", "50-1.000 × 10⁻⁶", "Variável"),
+    ("Serpentinito", "100-3.000 × 10⁻⁶", "Variável"),
+    ("Sedimentos", "0,1-5 × 10⁻⁶", "Variável"),
+]
+
+CLASSES_DECLIVIDADE = [
+    ("Plano", "0 – 3%", "Superfície horizontal"),
+    ("Suave ondulado", "3 – 8%", "Suave inclinação"),
+    ("Ondulado", "8 – 20%", "Relevo ondulado"),
+    ("Forte ondulado", "20 – 45%", "Aclive acentuado"),
+    ("Montanhoso", "45 – 75%", "Relevo escarpado"),
+    ("Escarpado", "> 75%", "Paredões, penhascos"),
+]
+
+PADROES_DRENAGEM = [
+    ("Dendrítico", "Ramificação aleatória", "Rochas homogêneas"),
+    ("Paralelo", "Canais paralelos", "Declives acentuados"),
+    ("Retangular", "Canais em ângulos retos", "Fraturas controlantes"),
+    ("Trellis / Treliçado", "Canais paralelos com tributários", "Estruturas dobradas"),
+    ("Radial", "Drenagem divergente", "Cúpulas, cones vulcânicos"),
+    ("Centripeta", "Drenagem convergente", "Depressões"),
+    ("Anelar", "Canais concêntricos", "Estruturas circulares"),
+    ("Pinnate / Pinnado", "Drenagem em pena", "Maciços de granito"),
+]
+
+FORMAS_RELEVO = [
+    ("Planície", "Apf", "Superfície plana"),
+    ("Planalto", "Pl", "Superfície elevada com topo plano"),
+    ("Depressão", "Dep", "Superfície rebaixada"),
+    ("Cuesta", "Cu", "Escarpa com declive suave e escarpado"),
+    ("Morro", "Mo", "Elevação arredondada"),
+    ("Serra", "Se", "Elevação alongada com cume estreito"),
+    ("Montanha", "Mt", "Elevação com grande altimetria"),
+    ("Vale", "Va", "Depressão linear entre elevações"),
+    ("Vale em V", "Vv", "Vale com encostas em V"),
+    ("Vale em U", "Vu", "Vale com encostas em U"),
+    ("Cumeada", "Cu", "Linha de cume alongada"),
+    ("Escarpa", "Es", "Desnível abrupto"),
+    ("Escarpa costeira", "Ecs", "Escarpa junto ao litoral"),
+]
+
+INTEMPERISMO_IBGE = [
+    ("FR (Fresco)", "Rocha sã", "Sem alteração visível"),
+    ("LE (Levemente alterado)", "Alteração incipiente", "Alteração superficial"),
+    ("MO (Moderado)", "Alteração parcial", "Minerais alterados parcialmente"),
+    ("AL (Altamente alterado)", "Alteração intensa", "Textura parcialmente preservada"),
+    ("DE (Decomposto)", "Alteração total", "Textura praticamente destruída"),
+    ("SA (Saprolito)", "Totalmente alterado", "Mantém relíquias de textura"),
+    ("SO (Solo)", "Material de solo", "Sem textura rochosa preservada"),
+    ("Outro", "Outro tipo de intemperismo", "Descrever nas observações"),
+]
+
+
+# ---------------------------------------------------------------------------
+# CSS PERSONALIZADO
+# ---------------------------------------------------------------------------
+def inject_css():
+    st.markdown(
+        """
+        <style>
+        .main { background-color: #f8f9fa; }
+        h1 { color: #2c3e50; }
+        h2 { color: #34495e; }
+        h3 { color: #34495e; }
+        .stButton>button { border-radius: 6px; }
+        .stProgress > div > div > div > div { background-color: #27ae60; }
+        .premium-badge { color: #f39c12; font-weight: bold; }
+        .free-badge { color: #3498db; font-weight: bold; }
+        .block-container { padding-top: 2rem; padding-bottom: 2rem; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# BANCO DE DADOS
+# ---------------------------------------------------------------------------
 def get_connection():
-    return sqlite3.connect(DB_FILE, check_same_thread=False)
+    return sqlite3.connect(DB_PATH, check_same_thread=False)
+
 
 def init_db():
     try:
         conn = get_connection()
         cur = conn.cursor()
-        cur.execute('''
+
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS stations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 ponto_id TEXT UNIQUE,
@@ -67,8 +299,9 @@ def init_db():
                 created_at TEXT,
                 updated_at TEXT
             )
-        ''')
-        cur.execute('''
+        """)
+
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS structures (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 station_id INTEGER,
@@ -81,8 +314,9 @@ def init_db():
                 observacoes TEXT,
                 created_at TEXT
             )
-        ''')
-        cur.execute('''
+        """)
+
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS samples (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 station_id INTEGER,
@@ -93,8 +327,9 @@ def init_db():
                 observacoes TEXT,
                 created_at TEXT
             )
-        ''')
-        cur.execute('''
+        """)
+
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS photos (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 station_id INTEGER,
@@ -102,8 +337,9 @@ def init_db():
                 arquivo TEXT,
                 created_at TEXT
             )
-        ''')
-        cur.execute('''
+        """)
+
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS license (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 is_premium INTEGER DEFAULT 0,
@@ -114,1087 +350,1064 @@ def init_db():
                 created_at TEXT,
                 updated_at TEXT
             )
-        ''')
+        """)
+
         conn.commit()
+        conn.close()
+        init_license()
     except Exception as e:
         st.error(f"Erro ao inicializar banco de dados: {e}")
-    finally:
-        if conn:
-            conn.close()
+
 
 def init_license():
     try:
         conn = get_connection()
         cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM license")
-        if cur.fetchone()[0] == 0:
+        cur.execute("SELECT id FROM license LIMIT 1")
+        if cur.fetchone() is None:
             now = datetime.datetime.now().isoformat()
-            cur.execute('''
-                INSERT INTO license (is_premium, stations_limit, user_email, plan_type, created_at, updated_at)
-                VALUES (0, 30, '', 'free', ?, ?)
-            ''', (now, now))
+            cur.execute(
+                "INSERT INTO license (is_premium, stations_limit, user_email, plan_type, expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (0, DEFAULT_FREE_LIMIT, "", "free", "", now, now),
+            )
             conn.commit()
+        conn.close()
     except Exception as e:
         st.error(f"Erro ao inicializar licença: {e}")
-    finally:
-        if conn:
-            conn.close()
 
+
+# ---------------------------------------------------------------------------
+# LICENÇA
+# ---------------------------------------------------------------------------
 def get_license():
     try:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute("SELECT * FROM license ORDER BY id DESC LIMIT 1")
         row = cur.fetchone()
+        conn.close()
         if row:
-            return {
-                "id": row[0],
-                "is_premium": bool(row[1]),
-                "stations_limit": row[2],
-                "user_email": row[3],
-                "plan_type": row[4],
-                "expires_at": row[5],
-                "created_at": row[6],
-                "updated_at": row[7],
-            }
+            cols = [desc[0] for desc in cur.description]
+            return dict(zip(cols, row))
         return None
     except Exception as e:
         st.error(f"Erro ao consultar licença: {e}")
         return None
-    finally:
-        if conn:
-            conn.close()
+
 
 def is_premium():
     lic = get_license()
-    if lic and lic["is_premium"]:
-        return True
-    return False
+    return bool(lic and lic.get("is_premium") == 1)
+
 
 def get_station_count():
     try:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute("SELECT COUNT(*) FROM stations")
-        return cur.fetchone()[0]
+        count = cur.fetchone()[0]
+        conn.close()
+        return count
     except Exception as e:
         st.error(f"Erro ao contar estações: {e}")
         return 0
-    finally:
-        if conn:
-            conn.close()
+
 
 def can_add_station():
     lic = get_license()
-    if lic and lic["is_premium"]:
+    if not lic:
+        return False
+    if lic.get("is_premium") == 1:
         return True
-    count = get_station_count()
-    limit = lic["stations_limit"] if lic else 30
-    return count < limit
+    limit = lic.get("stations_limit", DEFAULT_FREE_LIMIT)
+    return get_station_count() < limit
+
 
 def activate_premium(plan_type, email):
     try:
-        conn = get_connection()
-        cur = conn.cursor()
         now = datetime.datetime.now()
-        if plan_type == "monthly":
+        if plan_type == "Mensal":
             expires = now + datetime.timedelta(days=30)
-        elif plan_type == "semiannual":
+        elif plan_type == "Semestral":
             expires = now + datetime.timedelta(days=180)
-        elif plan_type == "annual":
+        elif plan_type == "Anual":
             expires = now + datetime.timedelta(days=365)
         else:
             expires = now + datetime.timedelta(days=30)
+
+        conn = get_connection()
+        cur = conn.cursor()
         cur.execute("DELETE FROM license")
-        cur.execute('''
-            INSERT INTO license (is_premium, stations_limit, user_email, plan_type, expires_at, created_at, updated_at)
-            VALUES (1, 999999, ?, ?, ?, ?, ?)
-        ''', (email, plan_type, expires.isoformat(), now.isoformat(), now.isoformat()))
+        cur.execute(
+            "INSERT INTO license (is_premium, stations_limit, user_email, plan_type, expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (1, 999999, email, plan_type, expires.isoformat(), now.isoformat(), now.isoformat()),
+        )
         conn.commit()
+        conn.close()
         return True
     except Exception as e:
         st.error(f"Erro ao ativar premium: {e}")
         return False
-    finally:
-        if conn:
-            conn.close()
+
 
 def reset_license():
     try:
         conn = get_connection()
         cur = conn.cursor()
-        now = datetime.datetime.now().isoformat()
         cur.execute("DELETE FROM license")
-        cur.execute('''
-            INSERT INTO license (is_premium, stations_limit, user_email, plan_type, created_at, updated_at)
-            VALUES (0, 30, '', 'free', ?, ?)
-        ''', (now, now))
-        conn.commit()
-    except Exception as e:
-        st.error(f"Erro ao resetar licença: {e}")
-    finally:
-        if conn:
-            conn.close()
-
-def next_station_id(cur):
-    cur.execute("SELECT MAX(id) FROM stations")
-    max_id = cur.fetchone()[0]
-    if max_id is None:
-        next_num = 1
-    else:
-        next_num = max_id + 1
-    return f"AF-{next_num:03d}"
-
-def list_stations_df():
-    try:
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM stations ORDER BY id DESC")
-        rows = cur.fetchall()
-        columns = [desc[0] for desc in cur.description]
-        import pandas as pd
-        return pd.DataFrame(rows, columns=columns)
-    except Exception as e:
-        st.error(f"Erro ao listar estações: {e}")
-        return None
-    finally:
-        if conn:
-            conn.close()
-
-def get_station_by_id(station_id):
-    try:
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM stations WHERE id = ?", (station_id,))
-        row = cur.fetchone()
-        if row:
-            columns = [desc[0] for desc in cur.description]
-            return dict(zip(columns, row))
-        return None
-    except Exception as e:
-        st.error(f"Erro ao buscar estação: {e}")
-        return None
-    finally:
-        if conn:
-            conn.close()
-
-def get_structures_by_station(station_id):
-    try:
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM structures WHERE station_id = ?", (station_id,))
-        rows = cur.fetchall()
-        columns = [desc[0] for desc in cur.description]
-        return [dict(zip(columns, row)) for row in rows]
-    except Exception as e:
-        st.error(f"Erro ao buscar estruturas: {e}")
-        return []
-    finally:
-        if conn:
-            conn.close()
-
-def get_samples_by_station(station_id):
-    try:
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM samples WHERE station_id = ?", (station_id,))
-        rows = cur.fetchall()
-        columns = [desc[0] for desc in cur.description]
-        return [dict(zip(columns, row)) for row in rows]
-    except Exception as e:
-        st.error(f"Erro ao buscar amostras: {e}")
-        return []
-    finally:
-        if conn:
-            conn.close()
-
-def insert_station(data, structures, samples_list):
-    try:
-        conn = get_connection()
-        cur = conn.cursor()
-        ponto_id = next_station_id(cur)
         now = datetime.datetime.now().isoformat()
-        cur.execute('''
-            INSERT INTO stations (
-                ponto_id, data, utm_zone, hemisferio, utm_east, utm_north, latitude, longitude, altitude,
-                localizacao, municipio, contexto_geologico, tipo_afloramento, dimensoes, orientacao_afloramento,
-                acesso, litologia_principal, litologia_secundaria, granulometria, cor, intemperismo,
-                observacoes, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            ponto_id, data.get("data"), data.get("utm_zone"), data.get("hemisferio"),
-            data.get("utm_east"), data.get("utm_north"), data.get("latitude"), data.get("longitude"),
-            data.get("altitude"), data.get("localizacao"), data.get("municipio"), data.get("contexto_geologico"),
-            data.get("tipo_afloramento"), data.get("dimensoes"), data.get("orientacao_afloramento"),
-            data.get("acesso"), data.get("litologia_principal"), data.get("litologia_secundaria"),
-            data.get("granulometria"), data.get("cor"), data.get("intemperismo"), data.get("observacoes"),
-            now, now
-        ))
-        station_id = cur.lastrowid
-        for s in structures:
-            cur.execute('''
-                INSERT INTO structures (station_id, tipo, strike, dip, dip_dir, plunge, azimuth, observacoes, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (station_id, s.get("tipo"), s.get("strike"), s.get("dip"), s.get("dip_dir"),
-                  s.get("plunge"), s.get("azimuth"), s.get("observacoes"), now))
-        for s in samples_list:
-            cur.execute('''
-                INSERT INTO samples (station_id, codigo, tipo, finalidade, orientada, observacoes, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (station_id, s.get("codigo"), s.get("tipo"), s.get("finalidade"), s.get("orientada"), s.get("observacoes"), now))
+        cur.execute(
+            "INSERT INTO license (is_premium, stations_limit, user_email, plan_type, expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (0, DEFAULT_FREE_LIMIT, "", "free", "", now, now),
+        )
         conn.commit()
+        conn.close()
         return True
     except Exception as e:
-        st.error(f"Erro ao salvar estação: {e}")
+        st.error(f"Erro ao redefinir licença: {e}")
         return False
-    finally:
-        if conn:
-            conn.close()
 
-def update_station(station_id, data, structures, samples_list):
+
+# ---------------------------------------------------------------------------
+# UTM / COORDENADAS
+# ---------------------------------------------------------------------------
+def utm_to_latlon(zone, east, north, hemisferio):
+    try:
+        zone_number = int(re.sub(r"[^0-9]", "", str(zone)) or "0")
+        if zone_number < 1 or zone_number > 60:
+            return None, None
+        northern = (hemisferio and hemisferio.upper().startswith("N"))
+        lat, lon = utm.to_latlon(east, north, zone_number, northern=northern)
+        return lat, lon
+    except Exception:
+        return None, None
+
+
+def latlon_to_utm(lat, lon):
+    try:
+        res = utm.from_latlon(lat, lon)
+        return res[2], res[0], res[1]
+    except Exception:
+        return None, None, None
+
+
+# ---------------------------------------------------------------------------
+# IDs
+# ---------------------------------------------------------------------------
+def next_station_id():
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT ponto_id FROM stations ORDER BY id DESC LIMIT 1")
+        row = cur.fetchone()
+        conn.close()
+        if row and row[0]:
+            m = re.search(r"(\d+)", str(row[0]))
+            if m:
+                n = int(m.group(1)) + 1
+            else:
+                n = get_station_count() + 1
+        else:
+            n = 1
+        return f"AF-{n:03d}"
+    except Exception as e:
+        st.error(f"Erro ao gerar ID: {e}")
+        return f"AF-{get_station_count() + 1:03d}"
+
+
+# ---------------------------------------------------------------------------
+# CRUD ESTAÇÃO
+# ---------------------------------------------------------------------------
+def insert_station(data):
     try:
         conn = get_connection()
         cur = conn.cursor()
         now = datetime.datetime.now().isoformat()
-        cur.execute('''
-            UPDATE stations SET
-                data = ?, utm_zone = ?, hemisferio = ?, utm_east = ?, utm_north = ?, latitude = ?, longitude = ?,
-                altitude = ?, localizacao = ?, municipio = ?, contexto_geologico = ?, tipo_afloramento = ?,
-                dimensoes = ?, orientacao_afloramento = ?, acesso = ?, litologia_principal = ?, litologia_secundaria = ?,
-                granulometria = ?, cor = ?, intemperismo = ?, observacoes = ?, updated_at = ?
-            WHERE id = ?
-        ''', (
-            data.get("data"), data.get("utm_zone"), data.get("hemisferio"), data.get("utm_east"),
-            data.get("utm_north"), data.get("latitude"), data.get("longitude"), data.get("altitude"),
-            data.get("localizacao"), data.get("municipio"), data.get("contexto_geologico"), data.get("tipo_afloramento"),
-            data.get("dimensoes"), data.get("orientacao_afloramento"), data.get("acesso"), data.get("litologia_principal"),
-            data.get("litologia_secundaria"), data.get("granulometria"), data.get("cor"), data.get("intemperismo"),
-            data.get("observacoes"), now, station_id
-        ))
-        cur.execute("DELETE FROM structures WHERE station_id = ?", (station_id,))
-        cur.execute("DELETE FROM samples WHERE station_id = ?", (station_id,))
-        for s in structures:
-            cur.execute('''
-                INSERT INTO structures (station_id, tipo, strike, dip, dip_dir, plunge, azimuth, observacoes, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (station_id, s.get("tipo"), s.get("strike"), s.get("dip"), s.get("dip_dir"),
-                  s.get("plunge"), s.get("azimuth"), s.get("observacoes"), now))
-        for s in samples_list:
-            cur.execute('''
-                INSERT INTO samples (station_id, codigo, tipo, finalidade, orientada, observacoes, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (station_id, s.get("codigo"), s.get("tipo"), s.get("finalidade"), s.get("orientada"), s.get("observacoes"), now))
+        data["created_at"] = now
+        data["updated_at"] = now
+        cols = [
+            "ponto_id", "data", "utm_zone", "hemisferio", "utm_east", "utm_north",
+            "latitude", "longitude", "altitude", "localizacao", "municipio",
+            "contexto_geologico", "tipo_afloramento", "dimensoes", "orientacao_afloramento",
+            "acesso", "litologia_principal", "litologia_secundaria", "granulometria", "cor",
+            "intemperismo", "observacoes", "created_at", "updated_at"
+        ]
+        values = [data.get(c) for c in cols]
+        cur.execute(
+            f"INSERT INTO stations ({','.join(cols)}) VALUES ({','.join(['?']*len(cols))})",
+            values,
+        )
+        station_id = cur.lastrowid
         conn.commit()
+        conn.close()
+        return station_id
+    except Exception as e:
+        st.error(f"Erro ao salvar estação: {e}")
+        return None
+
+
+def update_station(station_id, data):
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        now = datetime.datetime.now().isoformat()
+        data["updated_at"] = now
+        cols = [
+            "ponto_id", "data", "utm_zone", "hemisferio", "utm_east", "utm_north",
+            "latitude", "longitude", "altitude", "localizacao", "municipio",
+            "contexto_geologico", "tipo_afloramento", "dimensoes", "orientacao_afloramento",
+            "acesso", "litologia_principal", "litologia_secundaria", "granulometria", "cor",
+            "intemperismo", "observacoes", "updated_at"
+        ]
+        set_clause = ",".join([f"{c}=?" for c in cols])
+        values = [data.get(c) for c in cols] + [station_id]
+        cur.execute(f"UPDATE stations SET {set_clause} WHERE id=?", values)
+        conn.commit()
+        conn.close()
         return True
     except Exception as e:
         st.error(f"Erro ao atualizar estação: {e}")
         return False
-    finally:
-        if conn:
-            conn.close()
+
 
 def delete_station(station_id):
     try:
         conn = get_connection()
         cur = conn.cursor()
-        cur.execute("DELETE FROM structures WHERE station_id = ?", (station_id,))
-        cur.execute("DELETE FROM samples WHERE station_id = ?", (station_id,))
-        cur.execute("DELETE FROM photos WHERE station_id = ?", (station_id,))
-        cur.execute("DELETE FROM stations WHERE id = ?", (station_id,))
+        for t in ["structures", "samples", "photos"]:
+            cur.execute(f"DELETE FROM {t} WHERE station_id=?", (station_id,))
+        cur.execute("DELETE FROM stations WHERE id=?", (station_id,))
         conn.commit()
+        conn.close()
         return True
     except Exception as e:
         st.error(f"Erro ao excluir estação: {e}")
         return False
-    finally:
-        if conn:
-            conn.close()
 
-def reset_all_data():
+
+def get_station_by_id(station_id):
     try:
         conn = get_connection()
         cur = conn.cursor()
-        cur.execute("DELETE FROM structures")
-        cur.execute("DELETE FROM samples")
-        cur.execute("DELETE FROM photos")
-        cur.execute("DELETE FROM stations")
-        conn.commit()
+        cur.execute("SELECT * FROM stations WHERE id=?", (station_id,))
+        row = cur.fetchone()
+        conn.close()
+        if row:
+            cols = [desc[0] for desc in cur.description]
+            return dict(zip(cols, row))
+        return None
     except Exception as e:
-        st.error(f"Erro ao resetar dados: {e}")
-    finally:
-        if conn:
-            conn.close()
+        st.error(f"Erro ao carregar estação: {e}")
+        return None
 
-# --- FUNÇÕES DE CONVERSÃO UTM ---
 
-def utm_to_dd(zone, easting, northing, hemisphere="S"):
+def get_all_stations():
     try:
-        import utm
-        lat, lon = utm.to_latlon(easting, northing, int(zone[:-1]), zone[-1])
-        if hemisphere == "S" and lat > 0:
-            lat = -lat
-        return lat, lon
-    except Exception:
-        return None, None
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM stations ORDER BY id DESC")
+        rows = cur.fetchall()
+        cols = [desc[0] for desc in cur.description]
+        conn.close()
+        return [dict(zip(cols, row)) for row in rows]
+    except Exception as e:
+        st.error(f"Erro ao listar estações: {e}")
+        return []
 
-def dd_to_utm(lat, lon):
+
+def get_structures(station_id):
     try:
-        import utm
-        easting, northing, zone_number, zone_letter = utm.from_latlon(lat, lon)
-        zone = f"{zone_number}{zone_letter}"
-        hemisphere = "S" if lat < 0 else "N"
-        return zone, hemisphere, easting, northing
-    except Exception:
-        return None, None, None, None
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM structures WHERE station_id=?", (station_id,))
+        rows = cur.fetchall()
+        cols = [desc[0] for desc in cur.description]
+        conn.close()
+        return [dict(zip(cols, row)) for row in rows]
+    except Exception as e:
+        st.error(f"Erro ao listar estruturas: {e}")
+        return []
 
-# --- FUNÇÕES DE EXPORTAÇÃO ---
 
-def generate_kml(stations_df, structures_df, samples_df):
+def get_samples(station_id):
     try:
-        import simplekml
-        kml = simplekml.Kml()
-        for _, row in stations_df.iterrows():
-            lat = row.get("latitude")
-            lon = row.get("longitude")
-            alt = row.get("altitude") or 0
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM samples WHERE station_id=?", (station_id,))
+        rows = cur.fetchall()
+        cols = [desc[0] for desc in cur.description]
+        conn.close()
+        return [dict(zip(cols, row)) for row in rows]
+    except Exception as e:
+        st.error(f"Erro ao listar amostras: {e}")
+        return []
+
+
+def get_photos(station_id):
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM photos WHERE station_id=?", (station_id,))
+        rows = cur.fetchall()
+        cols = [desc[0] for desc in cur.description]
+        conn.close()
+        return [dict(zip(cols, row)) for row in rows]
+    except Exception as e:
+        st.error(f"Erro ao listar fotos: {e}")
+        return []
+
+
+def insert_structures(station_id, structures):
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        now = datetime.datetime.now().isoformat()
+        for s in structures:
+            cur.execute(
+                "INSERT INTO structures (station_id, tipo, strike, dip, dip_dir, plunge, azimuth, observacoes, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                (station_id, s.get("tipo"), s.get("strike"), s.get("dip"), s.get("dip_dir"), s.get("plunge"), s.get("azimuth"), s.get("observacoes"), now),
+            )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        st.error(f"Erro ao salvar estruturas: {e}")
+
+
+def insert_samples(station_id, samples):
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        now = datetime.datetime.now().isoformat()
+        for s in samples:
+            cur.execute(
+                "INSERT INTO samples (station_id, codigo, tipo, finalidade, orientada, observacoes, created_at) VALUES (?,?,?,?,?,?,?)",
+                (station_id, s.get("codigo"), s.get("tipo"), s.get("finalidade"), int(s.get("orientada") or 0), s.get("observacoes"), now),
+            )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        st.error(f"Erro ao salvar amostras: {e}")
+
+
+def insert_photos(station_id, photos):
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        now = datetime.datetime.now().isoformat()
+        for p in photos:
+            cur.execute(
+                "INSERT INTO photos (station_id, descricao, arquivo, created_at) VALUES (?,?,?,?)",
+                (station_id, p.get("descricao"), p.get("arquivo"), now),
+            )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        st.error(f"Erro ao salvar fotos: {e}")
+
+
+def delete_structures_by_station(station_id):
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM structures WHERE station_id=?", (station_id,))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        st.error(f"Erro ao excluir estruturas: {e}")
+
+
+def delete_samples_by_station(station_id):
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM samples WHERE station_id=?", (station_id,))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        st.error(f"Erro ao excluir amostras: {e}")
+
+
+def delete_photos_by_station(station_id):
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM photos WHERE station_id=?", (station_id,))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        st.error(f"Erro ao excluir fotos: {e}")
+
+
+# ---------------------------------------------------------------------------
+# EXPORTAÇÃO
+# ---------------------------------------------------------------------------
+def to_csv_bytes(stations):
+    try:
+        if not stations:
+            return b""
+        df = pd.DataFrame(stations)
+        for col in ["utm_east", "utm_north", "latitude", "longitude", "altitude"]:
+            if col not in df.columns:
+                df[col] = None
+        out = io.StringIO()
+        df.to_csv(out, index=False, encoding="utf-8")
+        return out.getvalue().encode("utf-8")
+    except Exception as e:
+        st.error(f"Erro ao exportar CSV: {e}")
+        return b""
+
+
+def to_geojson_bytes(stations):
+    try:
+        features = []
+        for s in stations:
+            lat = s.get("latitude")
+            lon = s.get("longitude")
             if lat is None or lon is None:
                 continue
-            pnt = kml.newpoint(name=str(row.get("ponto_id", "")), coords=[(lon, lat, alt)])
-            st_structures = structures_df[structures_df["station_id"] == row["id"]] if structures_df is not None and not structures_df.empty else None
-            st_samples = samples_df[samples_df["station_id"] == row["id"]] if samples_df is not None and not samples_df.empty else None
-            desc = f"""
-            <h3>{row.get('ponto_id', '')}</h3>
-            <p><b>Data:</b> {row.get('data', '')}</p>
-            <p><b>Localização:</b> {row.get('localizacao', '')}</p>
-            <p><b>Município:</b> {row.get('municipio', '')}</p>
-            <p><b>Coordenadas:</b> {lat:.6f}, {lon:.6f}</p>
-            <p><b>Altitude:</b> {alt}</p>
-            <p><b>Litologia principal:</b> {row.get('litologia_principal', '')}</p>
-            <p><b>Litologia secundária:</b> {row.get('litologia_secundaria', '')}</p>
-            <p><b>Tipo de afloramento:</b> {row.get('tipo_afloramento', '')}</p>
-            <p><b>Contexto geológico:</b> {row.get('contexto_geologico', '')}</p>
-            <p><b>Observações:</b> {row.get('observacoes', '')}</p>
-            """
-            if st_structures is not None and not st_structures.empty:
-                desc += "<<h4>Estruturas</h4><ul>"
-                for _, s in st_structures.iterrows():
-                    desc += f"<<li>{s.get('tipo', '')} - Strike: {s.get('strike', '')}, Dip: {s.get('dip', '')}, Dip Dir: {s.get('dip_dir', '')}, Plunge: {s.get('plunge', '')}, Azimuth: {s.get('azimuth', '')}</li>"
-                desc += "</ul>"
-            if st_samples is not None and not st_samples.empty:
-                desc += "<<h4>Amostras</h4><ul>"
-                for _, s in st_samples.iterrows():
-                    desc += f"<<li>{s.get('codigo', '')} - {s.get('tipo', '')} - {s.get('finalidade', '')} - Orientada: {'Sim' if s.get('orientada') else 'Não'}</li>"
-                desc += "</ul>"
-            pnt.description = desc
-        return kml.kml()
-    except Exception:
+            props = {k: v for k, v in s.items() if k not in ("latitude", "longitude")}
+            features.append({
+                "type": "Feature",
+                "geometry": {"type": "Point", "coordinates": [lon, lat]},
+                "properties": props,
+            })
+        geojson = {"type": "FeatureCollection", "features": features}
+        return json.dumps(geojson, ensure_ascii=False, indent=2).encode("utf-8")
+    except Exception as e:
+        st.error(f"Erro ao exportar GeoJSON: {e}")
+        return b""
+
+
+def to_kml_bytes(stations):
+    try:
         lines = [
             '<?xml version="1.0" encoding="UTF-8"?>',
             '<kml xmlns="http://www.opengis.net/kml/2.2">',
             "<<Document>",
-            "<<name>AfloraGeo</name>",
+            "<<name>AfloraGeo - Estações</name>",
         ]
-        for _, row in stations_df.iterrows():
-            lat = row.get("latitude")
-            lon = row.get("longitude")
-            alt = row.get("altitude") or 0
+        for s in stations:
+            lat = s.get("latitude")
+            lon = s.get("longitude")
             if lat is None or lon is None:
                 continue
-            name = str(row.get("ponto_id", "")).replace("&", "&amp;").replace("<<", "&lt;").replace(">", "&gt;")
-            desc = f"Ponto: {name}<br/>Data: {row.get('data', '')}<br/>Localização: {row.get('localizacao', '')}<br/>Município: {row.get('municipio', '')}<br/>Litologia: {row.get('litologia_principal', '')}"
-            desc = desc.replace("&", "&amp;").replace("<<", "&lt;").replace(">", "&gt;")
+            name = s.get("ponto_id") or "Estação"
+            desc = f"{s.get('localizacao') or ''} | {s.get('litologia_principal') or ''} | {s.get('tipo_afloramento') or ''}"
             lines.append("<<Placemark>")
-            lines.append(f"<<name>{name}</name>")
-            lines.append(f"<<description><![CDATA[{desc}]]></description>")
+            lines.append(f"<<name>{escape_xml(name)}</name>")
+            lines.append(f"<<description>{escape_xml(desc)}</description>")
             lines.append("<<Point>")
-            lines.append(f"<<coordinates>{lon},{lat},{alt}</coordinates>")
+            lines.append(f"<<coordinates>{lon},{lat},{s.get('altitude') or 0}</coordinates>")
             lines.append("</Point>")
             lines.append("</Placemark>")
-        lines.append("</Document>")
-        lines.append("</kml>")
-        return "\n".join(lines)
+        lines += ["</Document>", "</kml>"]
+        return "\n".join(lines).encode("utf-8")
+    except Exception as e:
+        st.error(f"Erro ao exportar KML: {e}")
+        return b""
 
-def generate_geojson(stations_df):
-    features = []
-    for _, row in stations_df.iterrows():
-        lat = row.get("latitude")
-        lon = row.get("longitude")
-        if lat is None or lon is None:
-            continue
-        features.append({
-            "type": "Feature",
-            "geometry": {
-                "type": "Point",
-                "coordinates": [lon, lat, row.get("altitude") or 0]
-            },
-            "properties": {
-                "ponto_id": row.get("ponto_id", ""),
-                "data": row.get("data", ""),
-                "localizacao": row.get("localizacao", ""),
-                "municipio": row.get("municipio", ""),
-                "litologia_principal": row.get("litologia_principal", ""),
-                "tipo_afloramento": row.get("tipo_afloramento", ""),
-                "contexto_geologico": row.get("contexto_geologico", ""),
-            }
-        })
-    return json.dumps({"type": "FeatureCollection", "features": features}, ensure_ascii=False, indent=2)
 
-def generate_csv(stations_df):
-    import pandas as pd
-    return stations_df.to_csv(index=False, encoding="utf-8-sig")
+def escape_xml(value):
+    if value is None:
+        return ""
+    value = str(value)
+    value = value.replace("&", "&amp;")
+    value = value.replace("<<", "&lt;")
+    value = value.replace(">", "&gt;")
+    value = value.replace('"', "&quot;")
+    return value
 
-def generate_docx(estacao_dict, structures_list, samples_list):
+
+def to_docx_bytes(stations):
     try:
-        from docx import Document
         doc = Document()
-        doc.add_heading(f"Estação {estacao_dict.get('ponto_id', '')}", level=1)
-        doc.add_paragraph(f"Data: {estacao_dict.get('data', '')}")
-        doc.add_paragraph(f"Localização: {estacao_dict.get('localizacao', '')}")
-        doc.add_paragraph(f"Município: {estacao_dict.get('municipio', '')}")
-        doc.add_paragraph(f"Coordenadas: {estacao_dict.get('latitude', '')}, {estacao_dict.get('longitude', '')}")
-        doc.add_paragraph(f"Altitude: {estacao_dict.get('altitude', '')}")
-        doc.add_paragraph(f"Litologia principal: {estacao_dict.get('litologia_principal', '')}")
-        doc.add_paragraph(f"Litologia secundária: {estacao_dict.get('litologia_secundaria', '')}")
-        doc.add_paragraph(f"Tipo de afloramento: {estacao_dict.get('tipo_afloramento', '')}")
-        doc.add_paragraph(f"Contexto geológico: {estacao_dict.get('contexto_geologico', '')}")
-        doc.add_paragraph(f"Observações: {estacao_dict.get('observacoes', '')}")
-        if structures_list:
-            doc.add_heading("Estruturas", level=2)
-            for s in structures_list:
-                doc.add_paragraph(f"{s.get('tipo', '')} - Strike: {s.get('strike', '')}, Dip: {s.get('dip', '')}, Dip Dir: {s.get('dip_dir', '')}, Plunge: {s.get('plunge', '')}, Azimuth: {s.get('azimuth', '')}")
-        if samples_list:
-            doc.add_heading("Amostras", level=2)
-            for s in samples_list:
-                doc.add_paragraph(f"{s.get('codigo', '')} - {s.get('tipo', '')} - {s.get('finalidade', '')} - Orientada: {'Sim' if s.get('orientada') else 'Não'}")
+        title = doc.add_heading("AfloraGeo - Caderneta de Campo Geológica", 0)
+        title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        doc.add_paragraph(f"Relatório gerado em {datetime.datetime.now().strftime('%d/%m/%Y %H:%M')}")
+        doc.add_paragraph()
+
+        for s in stations:
+            doc.add_heading(s.get("ponto_id") or "Estação", level=2)
+            p = doc.add_paragraph()
+            p.add_run("Data: ").bold = True
+            p.add_run(str(s.get("data") or "") + "\n")
+            p.add_run("Localização: ").bold = True
+            p.add_run(str(s.get("localizacao") or "") + "\n")
+            p.add_run("Município: ").bold = True
+            p.add_run(str(s.get("municipio") or "") + "\n")
+            p.add_run("Tipo de afloramento: ").bold = True
+            p.add_run(str(s.get("tipo_afloramento") or "") + "\n")
+            p.add_run("Litologia principal: ").bold = True
+            p.add_run(str(s.get("litologia_principal") or "") + "\n")
+            p.add_run("Litologia secundária: ").bold = True
+            p.add_run(str(s.get("litologia_secundaria") or "") + "\n")
+            p.add_run("Granulometria: ").bold = True
+            p.add_run(str(s.get("granulometria") or "") + "\n")
+            p.add_run("Cor: ").bold = True
+            p.add_run(str(s.get("cor") or "") + "\n")
+            p.add_run("Intemperismo: ").bold = True
+            p.add_run(str(s.get("intemperismo") or "") + "\n")
+            p.add_run("Coordenadas UTM: ").bold = True
+            p.add_run(f"Zona {s.get('utm_zone') or ''} {s.get('hemisferio') or ''} | E {s.get('utm_east') or ''} | N {s.get('utm_north') or ''}\n")
+            p.add_run("Latitude/Longitude: ").bold = True
+            p.add_run(f"{s.get('latitude') or ''}, {s.get('longitude') or ''}\n")
+            p.add_run("Altitude: ").bold = True
+            p.add_run(str(s.get("altitude") or "") + "\n")
+            p.add_run("Acesso: ").bold = True
+            p.add_run(str(s.get("acesso") or "") + "\n")
+            p.add_run("Contexto geológico: ").bold = True
+            p.add_run(str(s.get("contexto_geologico") or "") + "\n")
+            p.add_run("Dimensões: ").bold = True
+            p.add_run(str(s.get("dimensoes") or "") + "\n")
+            p.add_run("Orientação do afloramento: ").bold = True
+            p.add_run(str(s.get("orientacao_afloramento") or "") + "\n")
+            p.add_run("Observações: ").bold = True
+            p.add_run(str(s.get("observacoes") or "") + "\n")
+
+            structs = get_structures(s.get("id"))
+            if structs:
+                doc.add_paragraph().add_run("Estruturas:").bold = True
+                for es in structs:
+                    doc.add_paragraph(
+                        f"- {es.get('tipo') or ''}: strike {es.get('strike') or ''}, dip {es.get('dip') or ''}, "
+                        f"dip_dir {es.get('dip_dir') or ''}, plunge {es.get('plunge') or ''}, azimuth {es.get('azimuth') or ''}. "
+                        f"{es.get('observacoes') or ''}", style="List Bullet"
+                    )
+            samps = get_samples(s.get("id"))
+            if samps:
+                doc.add_paragraph().add_run("Amostras:").bold = True
+                for sa in samps:
+                    doc.add_paragraph(
+                        f"- {sa.get('codigo') or ''} | {sa.get('tipo') or ''} | {sa.get('finalidade') or ''} | "
+                        f"Orientada: {'Sim' if sa.get('orientada') else 'Não'}. {sa.get('observacoes') or ''}", style="List Bullet"
+                    )
+            doc.add_paragraph()
+
         buf = io.BytesIO()
         doc.save(buf)
         buf.seek(0)
-        return buf
-    except Exception:
-        html = f"""
-        <h1>Estação {estacao_dict.get('ponto_id', '')}</h1>
-        <p>Data: {estacao_dict.get('data', '')}</p>
-        <p>Localização: {estacao_dict.get('localizacao', '')}</p>
-        <p>Município: {estacao_dict.get('municipio', '')}</p>
-        <p>Coordenadas: {estacao_dict.get('latitude', '')}, {estacao_dict.get('longitude', '')}</p>
-        <p>Altitude: {estacao_dict.get('altitude', '')}</p>
-        <p>Litologia principal: {estacao_dict.get('litologia_principal', '')}</p>
-        <p>Litologia secundária: {estacao_dict.get('litologia_secundaria', '')}</p>
-        <p>Tipo de afloramento: {estacao_dict.get('tipo_afloramento', '')}</p>
-        <p>Contexto geológico: {estacao_dict.get('contexto_geologico', '')}</p>
-        <p>Observações: {estacao_dict.get('observacoes', '')}</p>
-        """
-        buf = io.BytesIO(html.encode("utf-8"))
-        return buf
+        return buf.getvalue()
+    except Exception as e:
+        st.error(f"Erro ao exportar DOCX: {e}")
+        return b""
 
-# --- DADOS DAS TABELAS DE APOIO ---
 
-DENSIDADE_ROCHAS = [
-    ("Aluvião", "1.5 - 2.0", "1.7"),
-    ("Argila", "1.6 - 2.6", "2.2"),
-    ("Areia", "1.6 - 2.6", "2.2"),
-    ("Arenito", "2.0 - 2.7", "2.3"),
-    ("Argilito", "2.3 - 2.7", "2.5"),
-    ("Calcário", "2.4 - 2.8", "2.6"),
-    ("Riolito", "2.4 - 2.7", "2.5"),
-    ("Andesito", "2.5 - 2.8", "2.6"),
-    ("Granito", "2.5 - 2.8", "2.6"),
-    ("Granodiorito", "2.6 - 2.8", "2.7"),
-    ("Diabásio", "2.8 - 3.1", "2.9"),
-    ("Basalto", "2.7 - 3.2", "2.9"),
-    ("Gabro", "2.8 - 3.1", "2.9"),
-    ("Peridotito", "2.8 - 3.4", "3.1"),
-    ("Piroxenito", "2.9 - 3.2", "3.0"),
-    ("Quartzito", "2.6 - 2.8", "2.7"),
-    ("Xisto", "2.5 - 2.8", "2.6"),
-    ("Granulito", "2.6 - 2.9", "2.7"),
-    ("Filito", "2.7 - 2.8", "2.7"),
-    ("Mármore", "2.5 - 2.8", "2.6"),
-    ("Ardósia", "2.7 - 2.8", "2.7"),
-    ("Gnaisse", "2.6 - 2.9", "2.7"),
-    ("Anfibolito", "2.9 - 3.2", "3.0"),
-    ("Eclogito", "3.3 - 3.5", "3.4"),
-]
+# ---------------------------------------------------------------------------
+# UI COMPONENTES
+# ---------------------------------------------------------------------------
+def sidebar():
+    st.sidebar.markdown("# AfloraGeo 🗻")
+    st.sidebar.markdown("Caderneta de Campo Geológica")
+    st.sidebar.markdown("---")
 
-VELOCIDADE_ONDAS_P = [
-    ("Areia seca", "0.2 - 1.0"),
-    ("Areia saturada", "1.2 - 1.8"),
-    ("Argila", "1.0 - 2.5"),
-    ("Till glacial", "1.5 - 2.7"),
-    ("Permafroste", "2.5 - 3.7"),
-    ("Arenitos", "2.0 - 4.0"),
-    ("Arenito Terciário", "1.4 - 2.3"),
-    ("Arenito Pennant", "3.7 - 4.1"),
-    ("Quartzito Cambriano", "5.5 - 5.7"),
-    ("Calcários", "2.5 - 6.1"),
-    ("Greda Cretácea", "2.1 - 2.8"),
-    ("Oólitos Jurássicos", "2.8 - 3.7"),
-    ("Calcário Carbonífero", "3.5 - 5.6"),
-    ("Dolomitos", "2.5 - 6.9"),
-    ("Sal", "4.5 - 5.5"),
-    ("Anidrita", "4.5 - 6.2"),
-    ("Gipso", "2.0 - 3.5"),
-    ("Granito", "4.8 - 5.6"),
-    ("Gabro", "5.5 - 6.5"),
-    ("Rochas ultramáficas", "6.5 - 8.2"),
-    ("Serpentinito", "5.3 - 6.6"),
-    ("Ar", "0.33"),
-    ("Água", "1.43 - 1.66"),
-    ("Gelo", "3.4 - 3.7"),
-    ("Petróleo", "1.3 - 1.4"),
-    ("Gás", "0.4 - 0.6"),
-    ("Aço", "5.9 - 6.1"),
-    ("Ferro", "5.9 - 6.1"),
-    ("Alumínio", "6.3 - 6.4"),
-    ("Concreto", "3.6 - 4.3"),
-]
+    if "pagina" not in st.session_state:
+        st.session_state.pagina = "Nova estação"
 
-SUSCETIBILIDADE_MAGNETICA = [
-    ("Ar", "0"),
-    ("Quartzo", "0"),
-    ("Rocha de sal", "-0.1"),
-    ("Calcita", "-0.1"),
-    ("Esfalerita", "-0.1"),
-    ("Pirita", "1.0"),
-    ("Hematita", "0.5 - 2.5"),
-    ("Ilmenita", "1.0 - 2.5"),
-    ("Magnetita", "1.2 - 19.2"),
-    ("Calcário", "0.0 - 0.3"),
-    ("Arenito", "0.0 - 2.0"),
-    ("Folhelho", "0.0 - 0.9"),
-    ("Xisto", "0.0 - 0.8"),
-    ("Gnaisse", "0.0 - 1.5"),
-    ("Ardósia", "0.0 - 0.7"),
-    ("Granito", "0.0 - 1.0"),
-    ("Gabro", "0.5 - 4.0"),
-    ("Basalto", "0.2 - 6.0"),
-    ("Peridotito", "0.5 - 6.0"),
-]
-
-# --- INICIALIZAÇÃO ---
-init_db()
-init_license()
-
-if "pagina" not in st.session_state:
-    st.session_state.pagina = "🆕 Nova Estação"
-if "edit_id" not in st.session_state:
-    st.session_state.edit_id = None
-
-# --- SIDEBAR ---
-st.sidebar.image("https://cdn-icons-png.flaticon.com/512/3063/3063176.png", width=80)
-st.sidebar.title("AfloraGeo 🌋")
-st.sidebar.markdown("Caderneta de campo geológica brasileira")
-
-licenca = get_license()
-station_count = get_station_count()
-limit = licenca["stations_limit"] if licenca else 30
-
-with st.sidebar.container(border=True):
-    st.markdown("### 💎 Status da Licença")
-    if licenca and licenca["is_premium"]:
-        st.success("💎 Premium ativo")
-        st.write(f"Plano: {licenca['plan_type']}")
-        st.write(f"Email: {licenca['user_email']}")
-        st.write(f"Expira em: {licenca['expires_at']}")
-    else:
-        st.write(f"Free - {station_count}/{limit} estações")
-        ratio = min(station_count / limit, 1.0) if limit > 0 else 0
-        if station_count <= 20:
-            color = "green"
-        elif station_count <= 28:
-            color = "yellow"
-        else:
-            color = "red"
-        st.progress(ratio, text=f"{station_count}/{limit} ({color})")
-
-pagina = st.sidebar.radio(
-    "Navegação",
-    ["🆕 Nova Estação", "📋 Lista de Estações", "🗺️ Mapa", "📊 Tabelas de Apoio", "📤 Exportar", "💎 Premium", "⚙️ Configurações"],
-    index=["🆕 Nova Estação", "📋 Lista de Estações", "🗺️ Mapa", "📊 Tabelas de Apoio", "📤 Exportar", "💎 Premium", "⚙️ Configurações"].index(st.session_state.pagina),
-)
-if pagina != st.session_state.pagina:
-    st.session_state.pagina = pagina
-    if pagina != "🆕 Nova Estação":
-        st.session_state.edit_id = None
-    st.rerun()
-
-st.sidebar.markdown("---")
-st.sidebar.markdown("v1.0 - AfloraGeo")
-
-# --- PÁGINA: NOVA ESTAÇÃO ---
-if st.session_state.pagina == "🆕 Nova Estação":
-    edit_id = st.session_state.edit_id
-    editing = edit_id is not None
-    estacao = None
-    structures_existing = []
-    samples_existing = []
-    if editing:
-        estacao = get_station_by_id(edit_id)
-        structures_existing = get_structures_by_station(edit_id)
-        samples_existing = get_samples_by_station(edit_id)
-
-    if editing and estacao:
-        st.title(f"✏️ Editar Estação {estacao.get('ponto_id', '')}")
-    else:
-        st.title("🆕 Nova Estação")
-
-    if not editing and not can_add_station():
-        st.error("Limite de estações atingido no plano Free. Assine o Premium para adicionar mais estações.")
-        if st.button("💎 Assinar Premium", type="primary"):
-            st.session_state.pagina = "💎 Premium"
+    pages = [
+        "Nova estação",
+        "Lista de estações",
+        "Mapa",
+        "Tabelas de apoio",
+        "Exportar",
+        "Premium",
+        "Configurações",
+    ]
+    for p in pages:
+        if st.sidebar.button(p, key=f"nav_{p}"):
+            st.session_state.pagina = p
             st.rerun()
-        st.stop()
 
-    with st.form("form_estacao"):
+    st.sidebar.markdown("---")
+    lic = get_license()
+    count = get_station_count()
+    if lic and lic.get("is_premium") == 1:
+        st.sidebar.markdown("<<span class='premium-badge'>⭐ PREMIUM ATIVADO</span>", unsafe_allow_html=True)
+        st.sidebar.markdown(f"Plano: {lic.get('plan_type') or ''}")
+        st.sidebar.markdown(f"Expira em: {lic.get('expires_at') or ''}")
+    else:
+        limit = lic.get("stations_limit", DEFAULT_FREE_LIMIT) if lic else DEFAULT_FREE_LIMIT
+        st.sidebar.markdown("<<span class='free-badge'>Versão Gratuita</span>", unsafe_allow_html=True)
+        st.sidebar.markdown(f"{count} / {limit} estações")
+        st.sidebar.progress(min(count / limit, 1.0))
+
+
+# ---------------------------------------------------------------------------
+# PÁGINA: NOVA ESTAÇÃO
+# ---------------------------------------------------------------------------
+def pagina_nova_estacao():
+    st.title("Nova Estação 📝")
+
+    if not can_add_station():
+        st.warning("Você atingiu o limite de estações gratuitas. Ative o Premium para continuar.")
+        return
+
+    edit_id = st.session_state.get("edit_id")
+    station = None
+    if edit_id:
+        station = get_station_by_id(edit_id)
+        if station:
+            st.info(f"Editando estação {station.get('ponto_id') or edit_id}")
+        else:
+            st.session_state.edit_id = None
+
+    with st.form("station_form"):
         col1, col2 = st.columns(2)
         with col1:
-            ponto_id = st.text_input("Nº do ponto", value=estacao.get("ponto_id") if estacao else "", disabled=True, help="Gerado automaticamente")
+            ponto_id = st.text_input("Ponto ID", value=station.get("ponto_id") if station else next_station_id())
         with col2:
-            data = st.date_input("Data", value=datetime.datetime.strptime(estacao.get("data"), "%Y-%m-%d").date() if estacao and estacao.get("data") else datetime.date.today())
+            data_field = station.get("data") if station else datetime.date.today().isoformat()
+            data = st.date_input("Data", value=datetime.date.fromisoformat(data_field) if data_field else datetime.date.today())
 
-        with st.expander("📍 Coordenadas", expanded=True):
-            coord_tipo = st.radio("Sistema de coordenadas", ["UTM", "DD (Latitude/Longitude)"], index=0 if estacao and estacao.get("utm_east") else 1)
-            if coord_tipo == "UTM":
-                c1, c2, c3, c4 = st.columns(4)
-                with c1:
-                    utm_zone = st.text_input("Zona UTM", value=estacao.get("utm_zone") if estacao else "23K")
-                with c2:
-                    hemisferio = st.selectbox("Hemisfério", ["S", "N"], index=0 if estacao and estacao.get("hemisferio") == "S" else 1)
-                with c3:
-                    utm_east = st.number_input("Este (m)", value=float(estacao.get("utm_east")) if estacao and estacao.get("utm_east") else 0.0, format="%.2f")
-                with c4:
-                    utm_north = st.number_input("Norte (m)", value=float(estacao.get("utm_north")) if estacao and estacao.get("utm_north") else 0.0, format="%.2f")
-                lat, lon = utm_to_dd(utm_zone, utm_east, utm_north, hemisferio)
-                if lat is not None and lon is not None:
-                    st.success(f"Latitude: {lat:.6f}, Longitude: {lon:.6f}")
-                else:
-                    lat, lon = None, None
-                    st.warning("Não foi possível converter UTM para DD. Verifique zona, este e norte.")
-            else:
-                c1, c2 = st.columns(2)
-                with c1:
-                    lat = st.number_input("Latitude", value=float(estacao.get("latitude")) if estacao and estacao.get("latitude") else 0.0, format="%.6f")
-                with c2:
-                    lon = st.number_input("Longitude", value=float(estacao.get("longitude")) if estacao and estacao.get("longitude") else 0.0, format="%.6f")
-                zone, hemisferio, utm_east, utm_north = dd_to_utm(lat, lon)
-                if zone:
-                    st.success(f"Zona UTM: {zone} ({hemisferio}), Este: {utm_east:.2f}, Norte: {utm_north:.2f}")
-                else:
-                    utm_zone, hemisferio, utm_east, utm_north = "", "S", 0.0, 0.0
-
-        altitude = st.number_input("Altitude (m)", value=float(estacao.get("altitude")) if estacao and estacao.get("altitude") else 0.0, format="%.2f")
-        localizacao = st.text_input("Localização", value=estacao.get("localizacao") if estacao else "")
-        municipio = st.text_input("Município", value=estacao.get("municipio") if estacao else "")
-        contexto_geologico = st.text_area("Contexto geológico", value=estacao.get("contexto_geologico") if estacao else "")
-
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            tipo_afloramento = st.selectbox(
-                "Tipo de afloramento",
-                ["Corte de estrada", "Lajeado", "Pedreira", "Rio", "Trincheira", "Galeria", "Outro"],
-                index=["Corte de estrada", "Lajeado", "Pedreira", "Rio", "Trincheira", "Galeria", "Outro"].index(estacao.get("tipo_afloramento")) if estacao and estacao.get("tipo_afloramento") in ["Corte de estrada", "Lajeado", "Pedreira", "Rio", "Trincheira", "Galeria", "Outro"] else 0,
-            )
-        with c2:
-            dimensoes = st.text_input("Dimensões (ex: 10 x 5 m)", value=estacao.get("dimensoes") if estacao else "")
-        with c3:
-            orientacao_afloramento = st.text_input("Orientação do afloramento", value=estacao.get("orientacao_afloramento") if estacao else "")
-        with c4:
-            acesso_opts = ["caminhamento", "carro", "barco", "helicoptero"]
-            acesso_defaults = [a.strip() for a in (estacao.get("acesso") or "").split(",") if a.strip() in acesso_opts] if estacao else []
-            acesso = ",".join(st.multiselect("Acesso", acesso_opts, default=acesso_defaults))
-
-        litologias = [
-            "Arenito", "Folhelho", "Calcário", "Diamictito", "Basalto", "Granito", "Gnaisse", "Xisto", "Quartzito",
-            "Mármore", "Argilito", "Siltito", "Conglomerado", "Riolito", "Gabro", "Anfibolito", "Outro"
-        ]
-        c1, c2 = st.columns(2)
-        with c1:
-            litologia_principal = st.selectbox(
-                "Litologia principal",
-                litologias,
-                index=litologias.index(estacao.get("litologia_principal")) if estacao and estacao.get("litologia_principal") in litologias else 0,
-            )
-            textura_principal = st.text_input("Textura litologia principal", value=estacao.get("litologia_principal") if estacao and estacao.get("litologia_principal") and estacao.get("litologia_principal") not in litologias else "")
-        with c2:
-            litologia_secundaria = st.selectbox(
-                "Litologia secundária",
-                ["Nenhuma"] + litologias,
-                index=(["Nenhuma"] + litologias).index(estacao.get("litologia_secundaria")) if estacao and estacao.get("litologia_secundaria") in (["Nenhuma"] + litologias) else 0,
-            )
-            textura_secundaria = st.text_input("Textura litologia secundária", value=estacao.get("litologia_secundaria") if estacao and estacao.get("litologia_secundaria") and estacao.get("litologia_secundaria") not in litologias else "")
-
+        st.subheader("Localização")
         c1, c2, c3 = st.columns(3)
         with c1:
-            granulometria = st.selectbox(
-                "Granulometria",
-                ["Argila", "Silte", "Areia fina", "Areia média", "Areia grossa", "Areia muito grossa", "Seixo", "Calhau", "Matacão"],
-                index=["Argila", "Silte", "Areia fina", "Areia média", "Areia grossa", "Areia muito grossa", "Seixo", "Calhau", "Matacão"].index(estacao.get("granulometria")) if estacao and estacao.get("granulometria") in ["Argila", "Silte", "Areia fina", "Areia média", "Areia grossa", "Areia muito grossa", "Seixo", "Calhau", "Matacão"] else 0,
-            )
+            utm_zone = st.text_input("Zona UTM", value=station.get("utm_zone") if station else "23")
         with c2:
-            cor = st.text_input("Cor", value=estacao.get("cor") if estacao else "")
+            hemisferio = st.selectbox("Hemisfério", ["S", "N"], index=0 if (not station or station.get("hemisferio") == "S") else 1)
         with c3:
-            intemperismo = st.selectbox(
-                "Intemperismo ISRM",
-                ["FR", "FRa", "FRr", "FM", "FMr", "FD", "FDr"],
-                index=["FR", "FRa", "FRr", "FM", "FMr", "FD", "FDr"].index(estacao.get("intemperismo")) if estacao and estacao.get("intemperismo") in ["FR", "FRa", "FRr", "FM", "FMr", "FD", "FDr"] else 0,
-            )
+            altitude = st.number_input("Altitude (m)", value=float(station.get("altitude") or 0.0), step=1.0)
 
-        with st.expander("📐 Estruturas e Atitudes"):
-            st.markdown("Adicione as estruturas da estação abaixo.")
-            structures = []
-            num_structures = max(len(structures_existing), 1)
-            for i in range(num_structures):
-                existing = structures_existing[i] if i < len(structures_existing) else {}
-                with st.container(border=True):
-                    c1, c2, c3, c4, c5, c6, c7 = st.columns([2, 1, 1, 1, 1, 1, 2])
-                    with c1:
-                        s_tipo = st.selectbox(
-                            "Tipo",
-                            ["Acamamento", "Foliação", "Fratura", "Falha", "Dobra", "Lineação", "Paleocorrente", "Veio", "Dique", "Xistosidade", "Clivagem", "Eixo de dobra", "Superfície axial", "Outro"],
-                            index=["Acamamento", "Foliação", "Fratura", "Falha", "Dobra", "Lineação", "Paleocorrente", "Veio", "Dique", "Xistosidade", "Clivagem", "Eixo de dobra", "Superfície axial", "Outro"].index(existing.get("tipo")) if existing.get("tipo") in ["Acamamento", "Foliação", "Fratura", "Falha", "Dobra", "Lineação", "Paleocorrente", "Veio", "Dique", "Xistosidade", "Clivagem", "Eixo de dobra", "Superfície axial", "Outro"] else 0,
-                            key=f"s_tipo_{i}",
-                        )
-                    with c2:
-                        s_strike = st.text_input("Strike", value=existing.get("strike") or "", key=f"s_strike_{i}")
-                    with c3:
-                        s_dip = st.number_input("Dip", value=float(existing.get("dip")) if existing.get("dip") else 0.0, key=f"s_dip_{i}")
-                    with c4:
-                        s_dip_dir = st.number_input("Dip Dir", value=float(existing.get("dip_dir")) if existing.get("dip_dir") else 0.0, key=f"s_dip_dir_{i}")
-                    with c5:
-                        s_plunge = st.number_input("Plunge", value=float(existing.get("plunge")) if existing.get("plunge") else 0.0, key=f"s_plunge_{i}")
-                    with c6:
-                        s_azimuth = st.number_input("Azimuth", value=float(existing.get("azimuth")) if existing.get("azimuth") else 0.0, key=f"s_azimuth_{i}")
-                    with c7:
-                        s_obs = st.text_input("Observações", value=existing.get("observacoes") or "", key=f"s_obs_{i}")
-                    structures.append({
-                        "tipo": s_tipo, "strike": s_strike, "dip": s_dip, "dip_dir": s_dip_dir,
-                        "plunge": s_plunge, "azimuth": s_azimuth, "observacoes": s_obs
-                    })
+        c4, c5 = st.columns(2)
+        with c4:
+            utm_east = st.number_input("Coordenada Leste (E)", value=float(station.get("utm_east") or 0.0), step=0.1)
+        with c5:
+            utm_north = st.number_input("Coordenada Norte (N)", value=float(station.get("utm_north") or 0.0), step=0.1)
 
-        with st.expander("💎 Amostras"):
-            st.markdown("Adicione as amostras coletadas.")
-            samples_list = []
-            num_samples = max(len(samples_existing), 1)
-            for i in range(num_samples):
-                existing = samples_existing[i] if i < len(samples_existing) else {}
-                with st.container(border=True):
-                    c1, c2, c3, c4, c5 = st.columns([2, 1, 1, 1, 2])
-                    with c1:
-                        sa_codigo = st.text_input("Código", value=existing.get("codigo") or "", key=f"sa_codigo_{i}")
-                    with c2:
-                        sa_tipo = st.selectbox(
-                            "Tipo",
-                            ["Manual", "Testemunho", "Calha"],
-                            index=["Manual", "Testemunho", "Calha"].index(existing.get("tipo")) if existing.get("tipo") in ["Manual", "Testemunho", "Calha"] else 0,
-                            key=f"sa_tipo_{i}",
-                        )
-                    with c3:
-                        sa_finalidade = st.selectbox(
-                            "Finalidade",
-                            ["Petrografia", "Geoquímica", "Geocronologia", "Granulometria", "Outro"],
-                            index=["Petrografia", "Geoquímica", "Geocronologia", "Granulometria", "Outro"].index(existing.get("finalidade")) if existing.get("finalidade") in ["Petrografia", "Geoquímica", "Geocronologia", "Granulometria", "Outro"] else 0,
-                            key=f"sa_finalidade_{i}",
-                        )
-                    with c4:
-                        sa_orientada = st.checkbox("Orientada", value=bool(existing.get("orientada")), key=f"sa_orientada_{i}")
-                    with c5:
-                        sa_obs = st.text_input("Observações", value=existing.get("observacoes") or "", key=f"sa_obs_{i}")
-                    samples_list.append({
-                        "codigo": sa_codigo, "tipo": sa_tipo, "finalidade": sa_finalidade,
-                        "orientada": 1 if sa_orientada else 0, "observacoes": sa_obs
-                    })
-
-        observacoes = st.text_area("Observações adicionais", value=estacao.get("observacoes") if estacao else "")
-
-        submitted = st.form_submit_button("💾 Salvar estação", type="primary")
-
-    if submitted:
-        if not editing and not can_add_station():
-            st.error("Limite atingido. Assine Premium.")
-        elif coord_tipo == "UTM" and (lat is None or lon is None):
-            st.error("Coordenadas UTM inválidas. Verifique zona, este e norte.")
-        else:
-            if litologia_principal == "Outro":
-                litologia_principal = textura_principal or "Outro"
-            if litologia_secundaria == "Outro":
-                litologia_secundaria = textura_secundaria or "Outro"
-            data_str = data.strftime("%Y-%m-%d")
-            station_data = {
-                "data": data_str, "utm_zone": utm_zone if coord_tipo == "UTM" else zone or "",
-                "hemisferio": hemisferio if coord_tipo == "UTM" else hemisferio or "S",
-                "utm_east": utm_east if coord_tipo == "UTM" else utm_east or 0.0,
-                "utm_north": utm_north if coord_tipo == "UTM" else utm_north or 0.0,
-                "latitude": lat, "longitude": lon, "altitude": altitude,
-                "localizacao": localizacao, "municipio": municipio,
-                "contexto_geologico": contexto_geologico, "tipo_afloramento": tipo_afloramento,
-                "dimensoes": dimensoes, "orientacao_afloramento": orientacao_afloramento,
-                "acesso": acesso, "litologia_principal": litologia_principal,
-                "litologia_secundaria": litologia_secundaria, "granulometria": granulometria,
-                "cor": cor, "intemperismo": intemperismo, "observacoes": observacoes,
-            }
-            if editing:
-                ok = update_station(edit_id, station_data, structures, samples_list)
-                if ok:
-                    st.success("Estação atualizada com sucesso!")
-                    st.session_state.edit_id = None
-                    st.session_state.pagina = "📋 Lista de Estações"
-                    st.rerun()
+        if st.form_submit_button("Converter UTM → Lat/Lon"):
+            lat, lon = utm_to_latlon(utm_zone, utm_east, utm_north, hemisferio)
+            if lat is not None and lon is not None:
+                st.session_state["lat_conv"] = lat
+                st.session_state["lon_conv"] = lon
+                st.success(f"Lat: {lat:.6f}, Lon: {lon:.6f}")
             else:
-                ok = insert_station(station_data, structures, samples_list)
-                if ok:
+                st.error("Conversão inválida. Verifique zona e coordenadas.")
+
+        lat = st.number_input("Latitude", value=float(station.get("latitude") if station else st.session_state.get("lat_conv", 0.0)), format="%.6f", step=0.000001)
+        lon = st.number_input("Longitude", value=float(station.get("longitude") if station else st.session_state.get("lon_conv", 0.0)), format="%.6f", step=0.000001)
+
+        localizacao = st.text_input("Localização / Descrição do local", value=station.get("localizacao") or "")
+        municipio = st.text_input("Município", value=station.get("municipio") or "")
+
+        st.subheader("Caracterização do Afloramento")
+        tipo_afloramento = st.selectbox("Tipo de afloramento", TIPOS_AFLO, index=TIPOS_AFLO.index(station.get("tipo_afloramento")) if station and station.get("tipo_afloramento") in TIPOS_AFLO else 0)
+        contexto_geologico = st.text_area("Contexto geológico", value=station.get("contexto_geologico") or "")
+        dimensoes = st.text_input("Dimensões (ex: 10m x 3m)", value=station.get("dimensoes") or "")
+        orientacao_afloramento = st.text_input("Orientação do afloramento", value=station.get("orientacao_afloramento") or "")
+
+        acesso_vals = station.get("acesso").split(", ") if station and station.get("acesso") else []
+        acesso = st.multiselect("Meio de acesso", ACESSOS, default=[a for a in acesso_vals if a in ACESSOS])
+
+        st.subheader("Litologia")
+        litologia_principal = st.text_input("Litologia principal", value=station.get("litologia_principal") or "")
+        litologia_secundaria = st.text_input("Litologia secundária", value=station.get("litologia_secundaria") or "")
+        granulometria = st.text_input("Granulometria / Textura", value=station.get("granulometria") or "")
+
+        cor_index = 0
+        if station and station.get("cor"):
+            stored = station.get("cor")
+            for i, (cod, nome) in enumerate(CORES_MUNSELL):
+                if f"{cod} ({nome})" == stored:
+                    cor_index = i
+                    break
+        cor_sel = st.selectbox("Cor (Munsell)", CORES_MUNSELL, index=cor_index, format_func=lambda x: f"{x[0]} - {x[1]}" if x[0] else x[1])
+        cor = f"{cor_sel[0]} ({cor_sel[1]})" if cor_sel[0] else ""
+
+        intemperismo_index = 0
+        if station and station.get("intemperismo"):
+            for i, (cod, _, _) in enumerate(INTEMPERISMO_IBGE):
+                if station.get("intemperismo") == cod:
+                    intemperismo_index = i
+                    break
+        intemperismo = st.selectbox("Intemperismo (IBGE-CPRM)", [i[0] for i in INTEMPERISMO_IBGE], index=intemperismo_index)
+
+        observacoes = st.text_area("Observações gerais", value=station.get("observacoes") or "")
+
+        st.subheader("Estruturas geológicas")
+        structures = []
+        with st.expander("Adicionar estruturas"):
+            n_structs = st.number_input("Quantidade de estruturas", min_value=0, max_value=20, value=0, step=1)
+            existing_structs = get_structures(edit_id) if edit_id else []
+            for i in range(int(n_structs)):
+                st.markdown(f"**Estrutura {i+1}**")
+                es = existing_structs[i] if i < len(existing_structs) else {}
+                tipo = st.selectbox("Tipo", TIPOS_ESTRUTURA_SELECT, index=TIPOS_ESTRUTURA_SELECT.index(es.get("tipo")) if es.get("tipo") in TIPOS_ESTRUTURA_SELECT else 0, key=f"st_tipo_{i}")
+                cc1, cc2, cc3, cc4, cc5 = st.columns(5)
+                with cc1:
+                    strike = st.text_input("Strike", value=es.get("strike") or "", key=f"st_strike_{i}")
+                with cc2:
+                    dip = st.number_input("Dip", value=float(es.get("dip") or 0.0), step=1.0, key=f"st_dip_{i}")
+                with cc3:
+                    dip_dir = st.number_input("Dip dir", value=float(es.get("dip_dir") or 0.0), step=1.0, key=f"st_dipdir_{i}")
+                with cc4:
+                    plunge = st.number_input("Plunge", value=float(es.get("plunge") or 0.0), step=1.0, key=f"st_plunge_{i}")
+                with cc5:
+                    azimuth = st.number_input("Azimuth", value=float(es.get("azimuth") or 0.0), step=1.0, key=f"st_azimuth_{i}")
+                obs_struct = st.text_input("Observações da estrutura", value=es.get("observacoes") or "", key=f"st_obs_{i}")
+                structures.append({
+                    "tipo": tipo, "strike": strike, "dip": dip, "dip_dir": dip_dir,
+                    "plunge": plunge, "azimuth": azimuth, "observacoes": obs_struct,
+                })
+
+        st.subheader("Amostras")
+        samples = []
+        with st.expander("Adicionar amostras"):
+            n_samples = st.number_input("Quantidade de amostras", min_value=0, max_value=20, value=0, step=1)
+            existing_samples = get_samples(edit_id) if edit_id else []
+            for i in range(int(n_samples)):
+                st.markdown(f"**Amostra {i+1}**")
+                sa = existing_samples[i] if i < len(existing_samples) else {}
+                cod = st.text_input("Código", value=sa.get("codigo") or f"{ponto_id}-A{i+1}", key=f"sa_cod_{i}")
+                tipo = st.text_input("Tipo de amostra", value=sa.get("tipo") or "Rocha", key=f"sa_tipo_{i}")
+                finalidade = st.selectbox("Finalidade", FINALIDADES_AMOSTRA_LISTA, index=FINALIDADES_AMOSTRA_LISTA.index(sa.get("finalidade")) if sa.get("finalidade") in FINALIDADES_AMOSTRA_LISTA else 0, key=f"sa_fin_{i}")
+                orientada = st.checkbox("Orientada", value=bool(sa.get("orientada")), key=f"sa_orient_{i}")
+                obs_samp = st.text_input("Observações da amostra", value=sa.get("observacoes") or "", key=f"sa_obs_{i}")
+                samples.append({
+                    "codigo": cod, "tipo": tipo, "finalidade": finalidade,
+                    "orientada": orientada, "observacoes": obs_samp,
+                })
+
+        st.subheader("Fotos")
+        photos = []
+        with st.expander("Anexar fotos"):
+            uploaded = st.file_uploader("Selecionar fotos", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+            if uploaded:
+                os.makedirs("fotos", exist_ok=True)
+                for uf in uploaded:
+                    try:
+                        filename = f"fotos/{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}_{uf.name}"
+                        with open(filename, "wb") as f:
+                            f.write(uf.read())
+                        photos.append({"descricao": uf.name, "arquivo": filename})
+                    except Exception as e:
+                        st.error(f"Erro ao salvar foto: {e}")
+
+        submitted = st.form_submit_button("Salvar estação")
+        if submitted:
+            try:
+                data_str = data.isoformat() if hasattr(data, "isoformat") else str(data)
+                station_data = {
+                    "ponto_id": ponto_id,
+                    "data": data_str,
+                    "utm_zone": utm_zone,
+                    "hemisferio": hemisferio,
+                    "utm_east": utm_east,
+                    "utm_north": utm_north,
+                    "latitude": lat,
+                    "longitude": lon,
+                    "altitude": altitude,
+                    "localizacao": localizacao,
+                    "municipio": municipio,
+                    "contexto_geologico": contexto_geologico,
+                    "tipo_afloramento": tipo_afloramento,
+                    "dimensoes": dimensoes,
+                    "orientacao_afloramento": orientacao_afloramento,
+                    "acesso": ", ".join(acesso),
+                    "litologia_principal": litologia_principal,
+                    "litologia_secundaria": litologia_secundaria,
+                    "granulometria": granulometria,
+                    "cor": cor,
+                    "intemperismo": intemperismo,
+                    "observacoes": observacoes,
+                }
+
+                if edit_id:
+                    update_station(edit_id, station_data)
+                    delete_structures_by_station(edit_id)
+                    delete_samples_by_station(edit_id)
+                    delete_photos_by_station(edit_id)
+                    station_id = edit_id
+                else:
+                    station_id = insert_station(station_data)
+
+                if station_id:
+                    if structures:
+                        insert_structures(station_id, structures)
+                    if samples:
+                        insert_samples(station_id, samples)
+                    if photos:
+                        insert_photos(station_id, photos)
                     st.success("Estação salva com sucesso!")
-                    st.session_state.pagina = "📋 Lista de Estações"
-                    st.rerun()
+                    st.session_state.edit_id = None
+                    st.balloons()
+            except Exception as e:
+                st.error(f"Erro ao salvar: {e}")
 
-# --- PÁGINA: LISTA DE ESTAÇÕES ---
-elif st.session_state.pagina == "📋 Lista de Estações":
-    st.title("📋 Lista de Estações")
-    df = list_stations_df()
-    if df is None or df.empty:
+
+# ---------------------------------------------------------------------------
+# PÁGINA: LISTA DE ESTAÇÕES
+# ---------------------------------------------------------------------------
+def pagina_lista_estacoes():
+    st.title("Lista de Estações 📋")
+    stations = get_all_stations()
+    if not stations:
         st.info("Nenhuma estação cadastrada.")
-    else:
-        import pandas as pd
+        return
+
+    df = pd.DataFrame(stations)
+    col1, col2, col3 = st.columns(3)
+    with col1:
         busca = st.text_input("Buscar texto")
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            data_inicio = st.date_input("Data início", value=None)
-        with c2:
-            data_fim = st.date_input("Data fim", value=None)
-        with c3:
-            litologias_unicas = sorted(df["litologia_principal"].dropna().unique().tolist())
-            filtro_litologia = st.multiselect("Litologia", litologias_unicas)
+    with col2:
+        datas = sorted([d for d in df["data"].dropna().unique() if d])
+        data_sel = st.selectbox("Filtrar por data", ["Todas"] + datas)
+    with col3:
+        litos = sorted([l for l in df["litologia_principal"].dropna().unique() if l])
+        lito_sel = st.selectbox("Filtrar por litologia", ["Todas"] + litos)
 
-        df_filt = df.copy()
-        if busca:
-            mask = df_filt.astype(str).apply(lambda x: x.str.contains(busca, case=False, na=False)).any(axis=1)
-            df_filt = df_filt[mask]
-        if data_inicio:
-            df_filt = df_filt[df_filt["data"] >= data_inicio.strftime("%Y-%m-%d")]
-        if data_fim:
-            df_filt = df_filt[df_filt["data"] <= data_fim.strftime("%Y-%m-%d")]
-        if filtro_litologia:
-            df_filt = df_filt[df_filt["litologia_principal"].isin(filtro_litologia)]
+    filtered = df
+    if busca:
+        mask = filtered.astype(str).apply(lambda row: busca.lower() in " ".join(row).lower(), axis=1)
+        filtered = filtered[mask]
+    if data_sel != "Todas":
+        filtered = filtered[filtered["data"] == data_sel]
+    if lito_sel != "Todas":
+        filtered = filtered[filtered["litologia_principal"] == lito_sel]
 
-        st.dataframe(df_filt, use_container_width=True, hide_index=True)
-        st.markdown(f"Total filtrado: {len(df_filt)}")
+    st.dataframe(filtered, use_container_width=True)
 
-        for _, row in df_filt.iterrows():
-            station_id = row["id"]
-            ponto_id = row["ponto_id"]
-            with st.expander(f"{ponto_id} - {row.get('data', '')} - {row.get('localizacao', '')}"):
-                st.write(f"**Município:** {row.get('municipio', '')}")
-                st.write(f"**Coordenadas:** {row.get('latitude', '')}, {row.get('longitude', '')}")
-                st.write(f"**Litologia principal:** {row.get('litologia_principal', '')}")
-                st.write(f"**Tipo de afloramento:** {row.get('tipo_afloramento', '')}")
-                st.write(f"**Contexto geológico:** {row.get('contexto_geologico', '')}")
-                st.write(f"**Observações:** {row.get('observacoes', '')}")
-                structures = get_structures_by_station(station_id)
-                if structures:
-                    st.write("**Estruturas:**")
-                    for s in structures:
-                        st.write(f"- {s['tipo']}: strike {s['strike']}, dip {s['dip']}, dip_dir {s['dip_dir']}, plunge {s['plunge']}, azimuth {s['azimuth']}")
-                samples = get_samples_by_station(station_id)
-                if samples:
-                    st.write("**Amostras:**")
-                    for s in samples:
-                        st.write(f"- {s['codigo']} ({s['tipo']}) - {s['finalidade']} - Orientada: {'Sim' if s['orientada'] else 'Não'}")
-                c1, c2 = st.columns(2)
-                with c1:
-                    if st.button("✏️ Editar", key=f"edit_{station_id}"):
-                        st.session_state.edit_id = station_id
-                        st.session_state.pagina = "🆕 Nova Estação"
-                        st.rerun()
-                with c2:
-                    with st.popover(f"🗑️ Excluir {ponto_id}"):
-                        st.warning(f"Tem certeza que deseja excluir {ponto_id}?")
-                        if st.button("Confirmar exclusão", key=f"del_{station_id}"):
-                            delete_station(station_id)
-                            st.success("Excluído!")
-                            st.rerun()
+    for _, row in filtered.iterrows():
+        sid = row.get("id")
+        ponto = row.get("ponto_id") or f"ID {sid}"
+        with st.expander(f"{ponto} | {row.get('data') or ''} | {row.get('localizacao') or ''}"):
+            st.write(f"**Município:** {row.get('municipio') or ''}")
+            st.write(f"**Tipo:** {row.get('tipo_afloramento') or ''}")
+            st.write(f"**Litologia:** {row.get('litologia_principal') or ''}")
+            st.write(f"**Cor:** {row.get('cor') or ''}")
+            st.write(f"**UTM:** Zona {row.get('utm_zone') or ''} {row.get('hemisferio') or ''} E {row.get('utm_east') or ''} N {row.get('utm_north') or ''}")
+            st.write(f"**Lat/Lon:** {row.get('latitude') or ''}, {row.get('longitude') or ''}")
+            st.write(f"**Observações:** {row.get('observacoes') or ''}")
 
-# --- PÁGINA: MAPA ---
-elif st.session_state.pagina == "🗺️ Mapa":
-    st.title("🗺️ Mapa de Estações")
-    try:
-        import folium
-        from streamlit_folium import st_folium
-        from folium.plugins import MarkerCluster
-        df = list_stations_df()
-        if df is None or df.empty:
-            st.info("Nenhuma estação para mostrar no mapa.")
-        else:
-            m = folium.Map(location=[-14.235, -51.925], zoom_start=4)
-            marker_cluster = MarkerCluster().add_to(m)
-            for _, row in df.iterrows():
-                lat = row.get("latitude")
-                lon = row.get("longitude")
-                if lat and lon:
-                    popup_html = f"""
-                    <b>{row.get('ponto_id', '')}</b><br>
-                    Litologia: {row.get('litologia_principal', '')}<br>
-                    Data: {row.get('data', '')}<br>
-                    Local: {row.get('localizacao', '')}
-                    """
-                    folium.Marker(
-                        [lat, lon],
-                        popup=folium.Popup(popup_html, max_width=250),
-                        tooltip=row.get("ponto_id", ""),
-                    ).add_to(marker_cluster)
-            st_folium(m, width=1200, height=600, returned_objects=[])
-            if st.button("🔄 Atualizar mapa"):
-                st.rerun()
-    except Exception as e:
-        st.error(f"Erro ao carregar mapa: {e}")
-        st.info("Certifique-se de ter folium e streamlit-folium instalados.")
+            structs = get_structures(sid)
+            if structs:
+                st.write("**Estruturas:**")
+                for es in structs:
+                    st.write(f"- {es.get('tipo')}: strike {es.get('strike')}, dip {es.get('dip')}")
+            samps = get_samples(sid)
+            if samps:
+                st.write("**Amostras:**")
+                for sa in samps:
+                    st.write(f"- {sa.get('codigo')} | {sa.get('finalidade')} | Orientada: {'Sim' if sa.get('orientada') else 'Não'}")
 
-# --- PÁGINA: TABELAS DE APOIO ---
-elif st.session_state.pagina == "📊 Tabelas de Apoio":
-    st.title("📊 Tabelas de Apoio")
-    import pandas as pd
-    tab1, tab2, tab3 = st.tabs(["Densidade de Rochas", "Velocidade de Ondas P", "Suscetibilidade Magnética"])
-    with tab1:
-        st.markdown("Fonte: Telford et al., 1990")
-        df_den = pd.DataFrame(DENSIDADE_ROCHAS, columns=["Material", "Intervalo (g/cm³)", "Valor Médio (g/cm³)"])
-        st.dataframe(df_den, use_container_width=True, hide_index=True)
-    with tab2:
-        st.markdown("Fonte: Kearey, Brooks & Hill, 2002")
-        df_vp = pd.DataFrame(VELOCIDADE_ONDAS_P, columns=["Material", "Velocidade Vp (km/s)"])
-        st.dataframe(df_vp, use_container_width=True, hide_index=True)
-    with tab3:
-        df_sus = pd.DataFrame(SUSCETIBILIDADE_MAGNETICA, columns=["Material", "Suscetibilidade (x10³ SI)"])
-        st.dataframe(df_sus, use_container_width=True, hide_index=True)
-
-# --- PÁGINA: EXPORTAR ---
-elif st.session_state.pagina == "📤 Exportar":
-    st.title("📤 Exportar Dados")
-    import pandas as pd
-    df = list_stations_df()
-    if df is None or df.empty:
-        st.info("Nenhuma estação para exportar.")
-    else:
-        structures_df = pd.DataFrame()
-        samples_df = pd.DataFrame()
-        try:
-            conn = get_connection()
-            structures_df = pd.read_sql_query("SELECT * FROM structures", conn)
-            samples_df = pd.read_sql_query("SELECT * FROM samples", conn)
-        except Exception:
-            pass
-        finally:
-            if conn:
-                conn.close()
-
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            kml_data = generate_kml(df, structures_df, samples_df)
-            st.download_button("📍 KML (Google Earth)", data=kml_data, file_name="aflorageo.kml", mime="application/vnd.google-earth.kml+xml")
-        with c2:
-            csv_data = generate_csv(df)
-            st.download_button("📄 CSV", data=csv_data, file_name="aflorageo.csv", mime="text/csv")
-        with c3:
-            geojson_data = generate_geojson(df)
-            st.download_button("🌐 GeoJSON", data=geojson_data, file_name="aflorageo.geojson", mime="application/geo+json")
-        with c4:
-            if is_premium():
-                for _, row in df.iterrows():
-                    st_id = row["id"]
-                    est_dict = row.to_dict()
-                    st_list = get_structures_by_station(st_id)
-                    sa_list = get_samples_by_station(st_id)
-                    docx_buf = generate_docx(est_dict, st_list, sa_list)
-                    st.download_button(f"DOCX {row['ponto_id']}", data=docx_buf, file_name=f"{row['ponto_id']}.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-            else:
-                st.error("Exportação DOCX disponível apenas para Premium")
-                if st.button("💎 Assinar Premium", key="btn_premium_export"):
-                    st.session_state.pagina = "💎 Premium"
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("Editar", key=f"edit_{sid}"):
+                    st.session_state.edit_id = sid
+                    st.session_state.pagina = "Nova estação"
                     st.rerun()
-
-# --- PÁGINA: PREMIUM ---
-elif st.session_state.pagina == "💎 Premium":
-    st.title("💎 Premium")
-    lic = get_license()
-    if lic and lic["is_premium"]:
-        st.success("🎉 Parabéns! Você já possui o plano Premium ativo.")
-        st.write(f"**Plano:** {lic['plan_type']}")
-        st.write(f"**Email:** {lic['user_email']}")
-        st.write(f"**Expira em:** {lic['expires_at']}")
-        if st.button("Gerenciar assinatura"):
-            st.info("Gerenciamento em breve via Pix/Mercado Pago.")
-    else:
-        st.markdown("### Escolha seu plano")
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            with st.container(border=True):
-                st.markdown("<<div class='premium-card'>Mensal<br>R$ 19,90/mês</div>", unsafe_allow_html=True)
-                if st.button("Assinar Mensal", key="mensal"):
-                    st.info("Pagamento em breve via Pix/Mercado Pago.")
-        with c2:
-            with st.container(border=True):
-                st.markdown("<<div class='premium-card'>Semestral<br>R$ 99,00/semestre<br>Economia 17%</div>", unsafe_allow_html=True)
-                if st.button("Assinar Semestral", key="semestral"):
-                    st.info("Pagamento em breve via Pix/Mercado Pago.")
-        with c3:
-            with st.container(border=True):
-                st.markdown("<<div class='premium-card-popular'>⭐ Mais popular<br>Anual<br>R$ 179,00/ano<br>Economia 25%</div>", unsafe_allow_html=True)
-                if st.button("Assinar Anual", key="anual"):
-                    st.info("Pagamento em breve via Pix/Mercado Pago.")
-
-        st.markdown("### Comparativo Free vs Premium")
-        comparativo = [
-            ["Estações", "30", "Ilimitadas"],
-            ["Caderneta digital", "✅", "✅"],
-            ["Mapa interativo", "✅", "✅"],
-            ["Tabelas de apoio", "✅", "✅"],
-            ["Exportação KML/GeoJSON/CSV", "✅", "✅"],
-            ["Exportação DOCX", "❌", "✅"],
-            ["Estereogramas (Schmidt + Rosetas)", "❌", "✅"],
-            ["Diagramas ternários", "❌", "✅"],
-            ["Módulo SedLog", "❌", "✅"],
-            ["Integração CPRM", "❌", "✅"],
-            ["Seções geológicas", "❌", "✅"],
-            ["Compartilhamento", "❌", "✅"],
-        ]
-        df_comp = pd.DataFrame(comparativo, columns=["Funcionalidade", "Free", "Premium"])
-        st.dataframe(df_comp, use_container_width=True, hide_index=True)
-
-        with st.expander("🔑 Ativação manual com chave"):
-            chave = st.text_input("Chave de ativação", type="password")
-            email_ativ = st.text_input("Email", key="email_ativacao")
-            plano_ativ = st.selectbox("Plano", ["monthly", "semiannual", "annual"], key="plano_ativacao")
-            if st.button("Ativar Premium"):
-                if chave == "AFLORAGEO-PREMIUM-2024":
-                    if activate_premium(plano_ativ, email_ativ):
-                        st.success("Premium ativado com sucesso!")
+            with c2:
+                if st.button("Excluir", key=f"del_{sid}"):
+                    if delete_station(sid):
+                        st.success("Estação excluída.")
                         st.rerun()
-                else:
-                    st.error("Chave inválida.")
 
-# --- PÁGINA: CONFIGURAÇÕES ---
-elif st.session_state.pagina == "⚙️ Configurações":
-    st.title("⚙️ Configurações")
+
+# ---------------------------------------------------------------------------
+# PÁGINA: MAPA
+# ---------------------------------------------------------------------------
+def pagina_mapa():
+    st.title("Mapa 🗺️")
+    stations = get_all_stations()
+    valid = [s for s in stations if s.get("latitude") and s.get("longitude")]
+    if not valid:
+        st.info("Nenhuma estação com coordenadas válidas.")
+        return
+
+    m = folium.Map(location=[-14.235, -51.925], zoom_start=4, tiles="OpenStreetMap")
+    marker_cluster = MarkerCluster().add_to(m)
+    for s in valid:
+        popup_html = f"""
+        <b>{s.get('ponto_id') or 'Estação'}</b><br>
+        {s.get('localizacao') or ''}<br>
+        {s.get('tipo_afloramento') or ''}<br>
+        {s.get('litologia_principal') or ''}
+        """
+        folium.Marker(
+            [s.get("latitude"), s.get("longitude")],
+            popup=folium.Popup(popup_html, max_width=250),
+            tooltip=s.get("ponto_id") or "Estação",
+        ).add_to(marker_cluster)
+    st_folium(m, width=1200, height=700)
+
+
+# ---------------------------------------------------------------------------
+# PÁGINA: TABELAS DE APOIO
+# ---------------------------------------------------------------------------
+def pagina_tabelas():
+    st.title("Tabelas de Apoio 📊")
+    tabs = st.tabs(["Densidade", "Vp", "Susceptibilidade", "Declividade", "Drenagem", "Relevo", "Intemperismo"])
+
+    with tabs[0]:
+        st.subheader("Densidade de rochas (Telford 1990, Kearey 2002)")
+        st.dataframe(pd.DataFrame(DENSIDADE_ROCHAS, columns=["Rocha", "Intervalo (g/cm³)", "Média (g/cm³)"]), use_container_width=True)
+
+    with tabs[1]:
+        st.subheader("Velocidade de ondas P (m/s)")
+        st.dataframe(pd.DataFrame(VELOCIDADE_ONDAS_P, columns=["Material", "Intervalo (m/s)", "Média (m/s)"]), use_container_width=True)
+
+    with tabs[2]:
+        st.subheader("Susceptibilidade magnética")
+        st.dataframe(pd.DataFrame(SUSCETIBILIDADE_MAGNETICA, columns=["Mineral/Rocha", "Susceptibilidade", "Classificação"]), use_container_width=True)
+
+    with tabs[3]:
+        st.subheader("Classes de declividade (IBGE)")
+        st.dataframe(pd.DataFrame(CLASSES_DECLIVIDADE, columns=["Classe", "Declividade", "Significado"]), use_container_width=True)
+
+    with tabs[4]:
+        st.subheader("Padrões de drenagem")
+        st.dataframe(pd.DataFrame(PADROES_DRENAGEM, columns=["Padrão", "Característica", "Contexto"]), use_container_width=True)
+
+    with tabs[5]:
+        st.subheader("Formas de relevo (IBGE)")
+        st.dataframe(pd.DataFrame(FORMAS_RELEVO, columns=["Forma", "Sigla", "Descrição"]), use_container_width=True)
+
+    with tabs[6]:
+        st.subheader("Intemperismo (IBGE-CPRM)")
+        st.dataframe(pd.DataFrame(INTEMPERISMO_IBGE, columns=["Código", "Descrição", "Observação"]), use_container_width=True)
+
+
+# ---------------------------------------------------------------------------
+# PÁGINA: EXPORTAR
+# ---------------------------------------------------------------------------
+def pagina_exportar():
+    st.title("Exportar 📤")
+    stations = get_all_stations()
+    if not stations:
+        st.info("Nenhuma estação para exportar.")
+        return
+
+    st.write(f"Total de estações: {len(stations)}")
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.download_button("Baixar CSV", data=to_csv_bytes(stations), file_name="aflorageo_estacoes.csv", mime="text/csv")
+    with col2:
+        st.download_button("Baixar GeoJSON", data=to_geojson_bytes(stations), file_name="aflorageo_estacoes.geojson", mime="application/geo+json")
+    with col3:
+        st.download_button("Baixar KML", data=to_kml_bytes(stations), file_name="aflorageo_estacoes.kml", mime="application/vnd.google-earth.kml+xml")
+    with col4:
+        if is_premium():
+            st.download_button("Baixar DOCX", data=to_docx_bytes(stations), file_name="aflorageo_relatorio.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        else:
+            st.button("DOCX (Premium)", disabled=True)
+            st.caption("DOCX disponível apenas para usuários Premium.")
+
+
+# ---------------------------------------------------------------------------
+# PÁGINA: PREMIUM
+# ---------------------------------------------------------------------------
+def pagina_premium():
+    st.title("Premium 💎")
     lic = get_license()
-    st.markdown("### Informações da Conta")
-    st.write(f"Email: {lic.get('user_email', 'Não informado')}")
-    st.markdown("### Status da Licença")
-    if lic and lic["is_premium"]:
-        st.success("💎 Premium")
-        st.write(f"Plano: {lic['plan_type']}")
-        st.write(f"Expira em: {lic['expires_at']}")
-    else:
-        st.info("Plano Free")
-        st.write(f"Limite: {lic.get('stations_limit', 30)} estações")
-    st.markdown("---")
-    st.markdown("### 🚨 Zona de Perigo")
-    with st.expander("Resetar todos os dados"):
-        st.warning("Esta ação excluirá TODAS as estações, estruturas, amostras e fotos. Não pode ser desfeita.")
-        confirmacao = st.text_input("Digite RESETAR para confirmar")
-        if st.button("Resetar dados", type="secondary"):
-            if confirmacao == "RESETAR":
-                reset_all_data()
-                reset_license()
-                st.success("Todos os dados foram resetados.")
-                st.session_state.edit_id = None
-                st.session_state.pagina = "🆕 Nova Estação"
-                st.rerun()
+    if lic and lic.get("is_premium") == 1:
+        st.success(f"Você já é Premium! Plano: {lic.get('plan_type')}. Expira em {lic.get('expires_at')}.")
+        return
+
+    st.markdown("Escolha um plano para desbloquear exportação DOCX e estações ilimitadas.")
+    c1, c2, c3 = st.columns(3)
+    plano = None
+    with c1:
+        st.markdown("### Mensal")
+        st.markdown("R$ 19,90 / mês")
+        if st.button("Assinar Mensal"):
+            plano = "Mensal"
+    with c2:
+        st.markdown("### Semestral")
+        st.markdown("R$ 99,00 / 6 meses")
+        if st.button("Assinar Semestral"):
+            plano = "Semestral"
+    with c3:
+        st.markdown("### Anual")
+        st.markdown("R$ 179,00 / ano")
+        if st.button("Assinar Anual"):
+            plano = "Anual"
+
+    with st.form("activation_form"):
+        st.markdown("Ou ative com chave de licença:")
+        chave = st.text_input("Chave de ativação", type="password")
+        email = st.text_input("E-mail")
+        submitted = st.form_submit_button("Ativar")
+        if submitted:
+            if chave.strip() == ACTIVATION_KEY:
+                plano_ativo = plano or "Anual"
+                if activate_premium(plano_ativo, email):
+                    st.success(f"Premium ativado com sucesso! Plano: {plano_ativo}")
+                    st.rerun()
             else:
-                st.error("Digite RESETAR corretamente.")
+                st.error("Chave de ativação inválida.")
+
+    st.markdown("---")
+    st.markdown("### Comparação de planos")
+    comp = pd.DataFrame({
+        "Recurso": ["Estações", "Exportar CSV/GeoJSON/KML", "Exportar DOCX", "Suporte"],
+        "Gratuito": ["30", "Sim", "Não", "Comunitário"],
+        "Premium": ["Ilimitado", "Sim", "Sim", "E-mail"],
+    })
+    st.dataframe(comp, use_container_width=True, hide_index=True)
+
+
+# ---------------------------------------------------------------------------
+# PÁGINA: CONFIGURAÇÕES
+# ---------------------------------------------------------------------------
+def pagina_configuracoes():
+    st.title("Configurações ⚙️")
+    lic = get_license()
+    st.subheader("Status da licença")
+    if lic and lic.get("is_premium") == 1:
+        st.markdown("<<span class='premium-badge'>⭐ Premium ativo</span>", unsafe_allow_html=True)
+        st.write(f"Plano: {lic.get('plan_type')}")
+        st.write(f"E-mail: {lic.get('user_email') or 'Não informado'}")
+        st.write(f"Expira em: {lic.get('expires_at')}")
+    else:
+        st.markdown("<<span class='free-badge'>Versão gratuita</span>", unsafe_allow_html=True)
+        st.write(f"Limite: {lic.get('stations_limit', DEFAULT_FREE_LIMIT) if lic else DEFAULT_FREE_LIMIT} estações")
+
+    st.subheader("Conta")
+    st.write("Banco de dados local: " + DB_PATH)
+
+    st.subheader("Zona de perigo")
+    with st.expander("Redefinir dados"):
+        st.warning("Atenção: esta ação excluirá todas as estações e redefinirá a licença para gratuita.")
+        if st.button("Resetar todos os dados"):
+            try:
+                conn = get_connection()
+                cur = conn.cursor()
+                for t in ["structures", "samples", "photos", "stations"]:
+                    cur.execute(f"DELETE FROM {t}")
+                conn.commit()
+                conn.close()
+                reset_license()
+                st.success("Dados redefinidos.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Erro ao resetar dados: {e}")
+
+
+# ---------------------------------------------------------------------------
+# MAIN
+# ---------------------------------------------------------------------------
+def main():
+    st.set_page_config(page_title="AfloraGeo", page_icon="🗻", layout="wide")
+    inject_css()
+    init_db()
+    sidebar()
+
+    pagina = st.session_state.get("pagina", "Nova estação")
+    if pagina == "Nova estação":
+        pagina_nova_estacao()
+    elif pagina == "Lista de estações":
+        pagina_lista_estacoes()
+    elif pagina == "Mapa":
+        pagina_mapa()
+    elif pagina == "Tabelas de apoio":
+        pagina_tabelas()
+    elif pagina == "Exportar":
+        pagina_exportar()
+    elif pagina == "Premium":
+        pagina_premium()
+    elif pagina == "Configurações":
+        pagina_configuracoes()
+    else:
+        pagina_nova_estacao()
+
+
+if __name__ == "__main__":
+    main()
