@@ -385,11 +385,10 @@ def get_license():
         cur = conn.cursor()
         cur.execute("SELECT * FROM license ORDER BY id DESC LIMIT 1")
         row = cur.fetchone()
+        cols = [desc[0] for desc in cur.description] if cur.description else []
+        lic = dict(zip(cols, row)) if row else None
         conn.close()
-        if row:
-            cols = [desc[0] for desc in cur.description]
-            return dict(zip(cols, row))
-        return None
+        return lic
     except Exception as e:
         st.error(f"Erro ao consultar licença: {e}")
         return None
@@ -591,9 +590,9 @@ def get_station_by_id(station_id):
         cur = conn.cursor()
         cur.execute("SELECT * FROM stations WHERE id=?", (station_id,))
         row = cur.fetchone()
+        cols = [desc[0] for desc in cur.description] if cur.description else []
         conn.close()
         if row:
-            cols = [desc[0] for desc in cur.description]
             return dict(zip(cols, row))
         return None
     except Exception as e:
@@ -607,7 +606,7 @@ def get_all_stations():
         cur = conn.cursor()
         cur.execute("SELECT * FROM stations ORDER BY id DESC")
         rows = cur.fetchall()
-        cols = [desc[0] for desc in cur.description]
+        cols = [desc[0] for desc in cur.description] if cur.description else []
         conn.close()
         return [dict(zip(cols, row)) for row in rows]
     except Exception as e:
@@ -621,7 +620,7 @@ def get_structures(station_id):
         cur = conn.cursor()
         cur.execute("SELECT * FROM structures WHERE station_id=?", (station_id,))
         rows = cur.fetchall()
-        cols = [desc[0] for desc in cur.description]
+        cols = [desc[0] for desc in cur.description] if cur.description else []
         conn.close()
         return [dict(zip(cols, row)) for row in rows]
     except Exception as e:
@@ -635,7 +634,7 @@ def get_samples(station_id):
         cur = conn.cursor()
         cur.execute("SELECT * FROM samples WHERE station_id=?", (station_id,))
         rows = cur.fetchall()
-        cols = [desc[0] for desc in cur.description]
+        cols = [desc[0] for desc in cur.description] if cur.description else []
         conn.close()
         return [dict(zip(cols, row)) for row in rows]
     except Exception as e:
@@ -649,7 +648,7 @@ def get_photos(station_id):
         cur = conn.cursor()
         cur.execute("SELECT * FROM photos WHERE station_id=?", (station_id,))
         rows = cur.fetchall()
-        cols = [desc[0] for desc in cur.description]
+        cols = [desc[0] for desc in cur.description] if cur.description else []
         conn.close()
         return [dict(zip(cols, row)) for row in rows]
     except Exception as e:
@@ -750,7 +749,7 @@ def to_csv_bytes(stations):
             if col not in df.columns:
                 df[col] = None
         out = io.StringIO()
-        df.to_csv(out, index=False, encoding="utf-8")
+        df.to_csv(out, index=False)
         return out.getvalue().encode("utf-8")
     except Exception as e:
         st.error(f"Erro ao exportar CSV: {e}")
@@ -783,8 +782,8 @@ def to_kml_bytes(stations):
         lines = [
             '<?xml version="1.0" encoding="UTF-8"?>',
             '<kml xmlns="http://www.opengis.net/kml/2.2">',
-            "<<Document>",
-            "<<name>AfloraGeo - Estações</name>",
+            '<Document>',
+            '<name>AfloraGeo - Estações</name>',
         ]
         for s in stations:
             lat = s.get("latitude")
@@ -793,11 +792,12 @@ def to_kml_bytes(stations):
                 continue
             name = s.get("ponto_id") or "Estação"
             desc = f"{s.get('localizacao') or ''} | {s.get('litologia_principal') or ''} | {s.get('tipo_afloramento') or ''}"
-            lines.append("<<Placemark>")
-            lines.append(f"<<name>{escape_xml(name)}</name>")
-            lines.append(f"<<description>{escape_xml(desc)}</description>")
-            lines.append("<<Point>")
-            lines.append(f"<<coordinates>{lon},{lat},{s.get('altitude') or 0}</coordinates>")
+            lines.append("<Placemark>")
+            lines.append(f"<name>{escape_xml(name)}</name>")
+            lines.append(f"<description>{escape_xml(desc)}</description>")
+            lines.append("<Point>")
+            alt = s.get('altitude') or 0
+            lines.append(f"<coordinates>{lon},{lat},{alt}</coordinates>")
             lines.append("</Point>")
             lines.append("</Placemark>")
         lines += ["</Document>", "</kml>"]
@@ -812,9 +812,10 @@ def escape_xml(value):
         return ""
     value = str(value)
     value = value.replace("&", "&amp;")
-    value = value.replace("<<", "&lt;")
+    value = value.replace("<", "&lt;")
     value = value.replace(">", "&gt;")
     value = value.replace('"', "&quot;")
+    value = value.replace("'", "&apos;")
     return value
 
 
@@ -921,14 +922,15 @@ def sidebar():
     lic = get_license()
     count = get_station_count()
     if lic and lic.get("is_premium") == 1:
-        st.sidebar.markdown("<<span class='premium-badge'>⭐ PREMIUM ATIVADO</span>", unsafe_allow_html=True)
+        st.sidebar.markdown("<span class='premium-badge'>⭐ PREMIUM ATIVADO</span>", unsafe_allow_html=True)
         st.sidebar.markdown(f"Plano: {lic.get('plan_type') or ''}")
         st.sidebar.markdown(f"Expira em: {lic.get('expires_at') or ''}")
     else:
         limit = lic.get("stations_limit", DEFAULT_FREE_LIMIT) if lic else DEFAULT_FREE_LIMIT
-        st.sidebar.markdown("<<span class='free-badge'>Versão Gratuita</span>", unsafe_allow_html=True)
+        st.sidebar.markdown("<span class='free-badge'>Versão Gratuita</span>", unsafe_allow_html=True)
         st.sidebar.markdown(f"{count} / {limit} estações")
-        st.sidebar.progress(min(count / limit, 1.0))
+        progress = min(count / limit, 1.0) if limit and limit > 0 else 1.0
+        st.sidebar.progress(progress)
 
 
 # ---------------------------------------------------------------------------
@@ -1058,7 +1060,7 @@ def pagina_nova_estacao():
                 sa = existing_samples[i] if i < len(existing_samples) else {}
                 cod = st.text_input("Código", value=sa.get("codigo") or f"{ponto_id}-A{i+1}", key=f"sa_cod_{i}")
                 tipo = st.text_input("Tipo de amostra", value=sa.get("tipo") or "Rocha", key=f"sa_tipo_{i}")
-                finalidade = st.selectbox("Finalidade", FINALIDADES_AMOSTRA_LISTA, index=FINALIDADES_AMOSTRA_LISTA.index(sa.get("finalidade")) if sa.get("finalidade") in FINALIDADES_AMOSTRA_LISTA else 0, key=f"sa_fin_{i}")
+                finalidade = st.selectbox("Finalidade", FINALIDADES_AMOSTRA_LISTA, index=FINALIDADES_AMOSTRA_LISTA.index(sa.get("finalidade")) if sa.get("finalidade") in FINALIDADES_AMOSTRA_LISTA else 0, key=f"sa_final_{i}")
                 orientada = st.checkbox("Orientada", value=bool(sa.get("orientada")), key=f"sa_orient_{i}")
                 obs_samp = st.text_input("Observações da amostra", value=sa.get("observacoes") or "", key=f"sa_obs_{i}")
                 samples.append({
@@ -1352,12 +1354,12 @@ def pagina_configuracoes():
     lic = get_license()
     st.subheader("Status da licença")
     if lic and lic.get("is_premium") == 1:
-        st.markdown("<<span class='premium-badge'>⭐ Premium ativo</span>", unsafe_allow_html=True)
+        st.markdown("<span class='premium-badge'>⭐ Premium ativo</span>", unsafe_allow_html=True)
         st.write(f"Plano: {lic.get('plan_type')}")
         st.write(f"E-mail: {lic.get('user_email') or 'Não informado'}")
         st.write(f"Expira em: {lic.get('expires_at')}")
     else:
-        st.markdown("<<span class='free-badge'>Versão gratuita</span>", unsafe_allow_html=True)
+        st.markdown("<span class='free-badge'>Versão gratuita</span>", unsafe_allow_html=True)
         st.write(f"Limite: {lic.get('stations_limit', DEFAULT_FREE_LIMIT) if lic else DEFAULT_FREE_LIMIT} estações")
 
     st.subheader("Conta")
